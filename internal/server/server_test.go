@@ -19,7 +19,7 @@ func newTestServer(t *testing.T, now time.Time) (*Server, *Store) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	srv := New(st)
+	srv := New(st, "")
 	srv.now = func() time.Time { return now }
 	return srv, st
 }

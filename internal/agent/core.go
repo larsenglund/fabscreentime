@@ -19,6 +19,7 @@ type Config struct {
 	DeviceUUID   string
 	Hostname     string
 	AgentVersion string
+	Build        int64 // monotonic build number, reported to the backend and used by the updater
 	Interval     time.Duration
 	Now          func() time.Time // injectable for tests
 }
@@ -30,18 +31,19 @@ type Agent struct {
 	sampler   Sampler
 	queue     *Queue
 	uploader  Uploader
+	updater   Updater // may be nil (e.g. no pinned keys, or in tests)
 	clockSkew time.Duration
 }
 
-// New wires an agent together.
-func New(cfg Config, s Sampler, q *Queue, u Uploader) *Agent {
+// New wires an agent together. updater may be nil to disable self-update.
+func New(cfg Config, s Sampler, q *Queue, u Uploader, up Updater) *Agent {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = time.Minute
 	}
-	return &Agent{cfg: cfg, sampler: s, queue: q, uploader: u}
+	return &Agent{cfg: cfg, sampler: s, queue: q, uploader: u, updater: up}
 }
 
 // deriveMonitorOn collapses the two raw monitor signals into a 0/1 the way the
@@ -87,6 +89,7 @@ func (a *Agent) flush(ctx context.Context) {
 	}
 	resp, err := a.uploader.Upload(ctx, shared.IngestRequest{
 		AgentVersion: a.cfg.AgentVersion,
+		AgentBuild:   a.cfg.Build,
 		DeviceUUID:   a.cfg.DeviceUUID,
 		Hostname:     a.cfg.Hostname,
 		Samples:      batch,
@@ -103,6 +106,14 @@ func (a *Agent) flush(ctx context.Context) {
 	}
 	log.Printf("uploaded %d samples (accepted %d, queued now %d, clock skew %s)",
 		len(batch), resp.Accepted, a.queue.Len(), a.clockSkew)
+
+	// Piggybacked update check (PLAN.md §5.1). The agent evaluates the signed
+	// manifest whenever one is present — it does not trust the backend's
+	// Available flag for the security decision (a compromised backend must not
+	// be able to suppress a genuine, pinned-key-signed update via that flag).
+	if a.updater != nil && resp.Update.Manifest != nil {
+		a.updater.Maybe(ctx, *resp.Update.Manifest)
+	}
 }
 
 // ClockSkew returns the last observed offset between server and local clocks.

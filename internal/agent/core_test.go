@@ -11,9 +11,12 @@ import (
 )
 
 type fakeUploader struct {
-	fail     bool
-	gotBatch int
-	serverTS int64
+	fail       bool
+	gotBatch   int
+	gotBuild   int64
+	serverTS   int64
+	updateSM   *shared.SignedManifest
+	updateFlag bool
 }
 
 func (f *fakeUploader) Upload(_ context.Context, req shared.IngestRequest) (shared.IngestResponse, error) {
@@ -21,22 +24,43 @@ func (f *fakeUploader) Upload(_ context.Context, req shared.IngestRequest) (shar
 		return shared.IngestResponse{}, errors.New("network down")
 	}
 	f.gotBatch = len(req.Samples)
-	return shared.IngestResponse{Accepted: len(req.Samples), ServerTime: f.serverTS}, nil
+	f.gotBuild = req.AgentBuild
+	return shared.IngestResponse{
+		Accepted:   len(req.Samples),
+		ServerTime: f.serverTS,
+		Update:     shared.UpdateInfo{Available: f.updateFlag, Manifest: f.updateSM},
+	}, nil
 }
 
 func newTestAgent(t *testing.T, u Uploader) (*Agent, *Queue) {
+	a, q, _ := newTestAgentWithUpdater(t, u, nil)
+	return a, q
+}
+
+func newTestAgentWithUpdater(t *testing.T, u Uploader, up Updater) (*Agent, *Queue, Config) {
 	t.Helper()
 	q, err := NewQueue(filepath.Join(t.TempDir(), "queue.json"), 5)
 	if err != nil {
 		t.Fatalf("NewQueue: %v", err)
 	}
 	fixedNow := time.Unix(1_700_000_000, 0)
-	a := New(Config{
+	cfg := Config{
 		DeviceUUID: "dev-1",
+		Build:      3,
 		Interval:   time.Minute,
 		Now:        func() time.Time { return fixedNow },
-	}, NewSampler(), q, u)
-	return a, q
+	}
+	return New(cfg, NewSampler(), q, u, up), q, cfg
+}
+
+type fakeUpdater struct {
+	calls  int
+	lastSM shared.SignedManifest
+}
+
+func (f *fakeUpdater) Maybe(_ context.Context, sm shared.SignedManifest) {
+	f.calls++
+	f.lastSM = sm
 }
 
 func TestTickRetainsQueueWhenUploadFails(t *testing.T) {
@@ -91,6 +115,31 @@ func TestQueuePersistsAcrossReopen(t *testing.T) {
 	}
 	if q2.Len() != 2 {
 		t.Fatalf("want 2 samples reloaded from disk, got %d", q2.Len())
+	}
+}
+
+func TestUpdaterInvokedOnlyWhenManifestPresent(t *testing.T) {
+	// No manifest → updater not called.
+	up := &fakeUpdater{}
+	upl := &fakeUploader{}
+	a, _, _ := newTestAgentWithUpdater(t, upl, up)
+	a.Tick(context.Background())
+	if up.calls != 0 {
+		t.Fatalf("updater called %d times with no manifest, want 0", up.calls)
+	}
+	if upl.gotBuild != 3 {
+		t.Fatalf("agent build reported as %d, want 3", upl.gotBuild)
+	}
+
+	// Manifest present → updater called with it, regardless of Available.
+	upl.updateSM = &shared.SignedManifest{Manifest: shared.Manifest{Version: "9.9.9", Build: 99}}
+	upl.updateFlag = false
+	a.Tick(context.Background())
+	if up.calls != 1 {
+		t.Fatalf("updater called %d times with manifest present, want 1", up.calls)
+	}
+	if up.lastSM.Manifest.Version != "9.9.9" {
+		t.Fatalf("updater got manifest %q, want 9.9.9", up.lastSM.Manifest.Version)
 	}
 }
 

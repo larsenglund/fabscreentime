@@ -15,14 +15,20 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/larsenglund/fabscreentime/internal/agent"
 )
 
-// Version is stamped at build time via -ldflags "-X main.Version=...".
-var Version = "0.0.0-dev"
+// Version and Build are stamped at build time via
+// -ldflags "-X main.Version=1.2.0 -X main.Build=2". Build is the monotonic
+// number the updater compares; it must increase every release.
+var (
+	Version = "0.0.0-dev"
+	Build   = "0"
+)
 
 func main() {
 	server := flag.String("server", "http://localhost:8080", "backend base URL")
@@ -41,6 +47,17 @@ func main() {
 		return
 	}
 
+	// One agent per user session — the update relaunch and a Task Scheduler
+	// trigger must not double-run (PLAN.md §5.2).
+	release, ok := agent.SingleInstance("FabScreenTimeAgent")
+	if !ok {
+		log.Print("another agent instance is already running; exiting")
+		return
+	}
+	defer release()
+
+	build, _ := strconv.ParseInt(Build, 10, 64)
+
 	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
 		log.Fatalf("datadir: %v", err)
 	}
@@ -55,18 +72,27 @@ func main() {
 		log.Fatalf("queue: %v", err)
 	}
 
+	// Self-update is enabled only if keys are pinned (fail-closed, PLAN.md §5.3).
+	var updater agent.Updater
+	if keys := agent.PinnedUpdateKeys(); len(keys) > 0 {
+		updater = agent.NewSelfUpdater(*server, build, keys)
+	} else {
+		log.Print("no pinned update keys compiled in — self-update disabled")
+	}
+
 	a := agent.New(agent.Config{
 		DeviceUUID:   deviceUUID,
 		Hostname:     hostname,
 		AgentVersion: Version,
+		Build:        build,
 		Interval:     *interval,
-	}, agent.NewSampler(), queue, agent.NewHTTPUploader(*server))
+	}, agent.NewSampler(), queue, agent.NewHTTPUploader(*server), updater)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("agent %s starting: device=%s host=%s server=%s interval=%s",
-		Version, deviceUUID, hostname, *server, *interval)
+	log.Printf("agent %s (build %d) starting: device=%s host=%s server=%s interval=%s",
+		Version, build, deviceUUID, hostname, *server, *interval)
 	a.Run(ctx)
 }
 

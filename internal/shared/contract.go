@@ -22,16 +22,38 @@ type Sample struct {
 // IngestRequest is the body of POST /api/ingest — the agent's single periodic call.
 type IngestRequest struct {
 	AgentVersion string   `json:"agent_version"`
+	AgentBuild   int64    `json:"agent_build"` // monotonic build number, for the update-availability hint
 	DeviceUUID   string   `json:"device_uuid"` // Phase 0 identity; replaced by per-device tokens in Phase 3
 	Hostname     string   `json:"hostname"`
 	Samples      []Sample `json:"samples"`
 }
 
-// UpdateInfo is the auto-update block returned on every ingest. Stubbed in
-// Phase 0; the signed-manifest fields arrive in Phase 1 (PLAN.md §5).
+// Manifest describes an agent release. Every field is covered by the signature
+// (PLAN.md §5.3 H3): version/build/timestamp/mandatory/url are all bound to the
+// binary hash as one signed unit, so a compromised backend cannot mix and match
+// (e.g. pair an old signed binary with a spoofed higher version).
+type Manifest struct {
+	Version   string `json:"version"`
+	Build     int64  `json:"build"`     // monotonic; the agent refuses build <= its own
+	SHA256    string `json:"sha256"`    // hex sha256 of the agent binary
+	Timestamp int64  `json:"timestamp"` // unix seconds, signing time
+	Mandatory bool   `json:"mandatory"`
+	URL       string `json:"url"` // MUST be server-relative (same-origin), e.g. /agent/download?v=1.2.0
+}
+
+// SignedManifest is a Manifest plus its detached Ed25519 signature (hex) over
+// the manifest's canonical bytes, verifiable against a key pinned in the agent.
+type SignedManifest struct {
+	Manifest Manifest `json:"manifest"`
+	Sig      string   `json:"sig"`
+}
+
+// UpdateInfo is the auto-update block returned on every ingest (PLAN.md §5.1).
+// The agent verifies Manifest against its pinned keys and decides for itself;
+// Available is only a hint the agent does not trust for the security decision.
 type UpdateInfo struct {
-	Available bool   `json:"available"`
-	Version   string `json:"version,omitempty"`
+	Available bool            `json:"available"`
+	Manifest  *SignedManifest `json:"manifest,omitempty"`
 }
 
 // IngestResponse is returned by POST /api/ingest.

@@ -81,9 +81,32 @@ If `monitors_active` drops to 0 while the monitor is off, connection-presence is
 that machine (typical of DisplayPort). If it stays put (typical of HDMI), that machine needs the
 fallback ladder in PLAN.md §4.4c. Test at least one DisplayPort and one HDMI PC.
 
+### Signed releases (Phase 1)
+
+Auto-update is fail-closed: the agent applies a new build only if its manifest is signed by a key
+pinned in the agent binary, binds a strictly newer build number, and points at a same-origin URL —
+all verified before anything is downloaded or swapped (PLAN.md §5.3). A compromised backend cannot
+push code.
+
+```bash
+go run ./cmd/fst-sign genkey -out release.key      # once; keep release.key OFFLINE
+#   → prints a public key; paste it into internal/agent/pinnedkeys.go and rebuild the agent.
+go run ./cmd/fst-sign sign -key release.key -in dist/agent.exe -version 1.2.0 -build 2 \
+      -out dist/manifest.json
+go run ./cmd/fst-sign verify -pub <hex> -manifest dist/manifest.json -bin dist/agent.exe
+```
+
+Drop `agent.exe` + `manifest.json` into the backend's `-agentdir`; it serves them at
+`/agent/manifest` and `/agent/download` and advertises the update on the next `/api/ingest`.
+
 ### Status
 
-Phase 0 (walking skeleton) is implemented: agent sampling + bounded offline queue, batched
-idempotent ingest with timestamp clamping, per-device summary aggregates, a no-build placeholder
-dashboard, and CI that runs the real Win32 code on a Windows runner. Next up is Phase 1 (the signed
-auto-update firebreak) — see the roadmap in [PLAN.md §10](./PLAN.md).
+- **Phase 0 (walking skeleton):** agent sampling + bounded offline queue, batched idempotent
+  ingest with timestamp clamping, per-device summary, a no-build placeholder dashboard, CI that runs
+  the real Win32 code on a Windows runner.
+- **Phase 1 (signed auto-update firebreak):** Ed25519-signed manifests, dual pinned keys, monotonic
+  anti-rollback, same-origin download enforcement, fail-closed verify-before-swap, offline signing
+  CLI. Tested end to end (valid update applies; tampered / unsigned / downgrade / off-origin /
+  wrong-hash all rejected before the binary is touched).
+
+Next: Phase 2 (monitor signal + silent autostart) — see the roadmap in [PLAN.md §10](./PLAN.md).

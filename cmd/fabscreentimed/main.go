@@ -20,6 +20,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dbPath := flag.String("db", "fabscreentime.db", "path to the SQLite database")
+	agentDir := flag.String("agentdir", "", "directory holding the signed agent release (manifest.json + agent.exe)")
 	flag.Parse()
 
 	store, err := server.OpenStore(*dbPath)
@@ -30,7 +31,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           server.New(store).Handler(),
+		Handler:           server.New(store, *agentDir).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
