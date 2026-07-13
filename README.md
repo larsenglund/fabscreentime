@@ -10,11 +10,12 @@ every enrolled machine. New machines enroll from the website.
 
 ## The one idea to know
 
-**Monitor-on time is the primary "screentime" metric**, not raw input activity. Autoclickers can
-forge mouse/keyboard input indistinguishably at the OS API, but (for the household's actual usage)
-they run with the monitor off — so monitor-on is the better proxy for a human actually present.
-This premise has an important caveat and a required validation step; see
-[PLAN.md §0.1](./PLAN.md).
+**Monitor-on time is the primary "screentime" metric**, not raw input activity — autoclickers can
+forge mouse/keyboard input indistinguishably at the OS API, but they run with the monitor
+physically powered off. The catch: a physical power-off is only detectable via monitor
+**connection/presence** (`QueryDisplayConfig`), which drops reliably on **DisplayPort** but often
+not on **HDMI** — so the metric must be validated on the real hardware first. See
+[PLAN.md §0.1](./PLAN.md) for the mechanism, the DP-vs-HDMI dependency, and the fallback ladder.
 
 ## Intended shape (see PLAN.md for the why)
 

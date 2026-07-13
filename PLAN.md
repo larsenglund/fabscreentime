@@ -19,46 +19,68 @@ moving parts that satisfy the requirements.
 
 ## 0. Read this first — key decisions & the one thing to validate before building
 
-### 0.1 CRITICAL: the "monitor-on can't be faked" premise is *probably* true for your setup — but must be validated, and the framing must be honest
+### 0.1 CRITICAL: measure monitor **connection/presence**, not display **power state** — because the user physically powers off the monitor
 
-The whole design leans on: *monitor-on time is a trustworthy proxy for real human screentime
-because your household's autoclickers never run with the screen on.* The feasibility review
-found an important subtlety that changes how we describe (and trust) this signal:
+The design leans on: *monitor-on time is a trustworthy proxy for real human screentime because
+the household's autoclickers never run with the screen on.* The clarified usage is decisive:
+**the autoclicker is started while the screen is on, then the user physically presses the power
+button on the monitor**, and the macro keeps running with the monitor physically off. This is
+exactly the case where the originally-proposed signal fails, so the primary signal must change.
 
-- The signal we can actually read (`GUID_SESSION_DISPLAY_STATUS`) is the **OS's logical
-  display-power state**, not the physical panel. Windows drives it "off" on the power-plan
-  idle timeout, on sleep, or on a software "turn off display" — **not** when someone presses
-  the power button on an external monitor (the GPU keeps driving the output, so the logical
-  state stays "on"). So monitor-off is reliable when the display *times out or sleeps*, but
-  blind to a physically-switched-off external monitor.
-- Whether an autoclicker keeps the screen awake depends entirely on **how it injects input**:
-  - `SendInput` / `mouse_event` / `keybd_event` post to the **system input queue**, which
-    resets *both* `GetLastInputInfo` **and** the display idle-off timer → the screen stays on
-    and input looks active. Both signals are fooled.
-  - `PostMessage` / `SendMessage` to a specific game window (the classic "background clicker")
-    **bypasses** the system input queue → resets *neither* → the display sleeps normally and
-    input correctly reads idle. Both signals correctly exclude it.
+**Why the original signal (`GUID_SESSION_DISPLAY_STATUS`) does *not* work here.** That API
+reports the **OS's logical display-power state** (DPMS), which Windows drives from the power
+policy — idle timeout, sleep, or a software "turn off display". **Physically pressing the
+monitor's power button is not a DPMS event.** The GPU keeps driving the output, and if the macro
+is generating input the idle-off timer never fires either — so the logical state stays `1` (on).
+Result: with the original signal, **the autoclicker's monitor-physically-off hours would be
+counted as screentime.** The premise breaks.
 
-**Here is the key insight that resolves this for your case:** your own observation — *"the
-autoclickers never run with the screen on"* — is only physically possible if your macros are
-the window-message kind (or you manually sleep the display and the macro doesn't use
-`SendInput`). A `SendInput`-based macro *cannot* leave the screen off while it runs. So your
-stated behaviour is itself strong evidence that **monitor-off will correctly exclude your
-macros**. Good — but two things follow:
+**The signal that *does* track a physical power-off is monitor connection/presence.** When a
+monitor is switched off it can drop its hot-plug-detect (HPD) line, and Windows then removes it
+from the display topology — moving windows/icons to another display (or, for a single monitor,
+leaving **zero active displays**). The catch is that this is **connection-dependent**:
 
-1. **Drop the absolute "un-fakeable" language.** Monitor-on is the *best available
-   unprivileged presence proxy*, not a tamper-proof one. It can be inflated if someone runs a
-   `SendInput`-style jiggler, or turns an external monitor off at its button while the PC
-   keeps the output awake. Present it honestly in the UI (see §7).
-2. **Validate it empirically before building Phase 2 (≈20 lines, ~1 hour).** Write a throwaway
-   probe that logs `GUID_SESSION_DISPLAY_STATUS` + `GetLastInputInfo` once a second on **one
-   real household PC**, and capture four traces: (a) normal use, (b) walk away and let it time
-   out, (c) turn the monitor off *the way the household actually does it*, (d) run the
-   household's *actual* autoclicker. If trace (c)/(d) still read `monitor_on = 1`, the headline
-   metric is compromised and you need a fallback before you build on it. This spike is Phase 0
-   and it de-risks the entire architecture for almost no cost.
+- **DisplayPort → reliably detectable.** Powering a DP monitor off makes Windows treat it as
+  *disconnected*; the display leaves the active topology. This is a well-known (often
+  complained-about) DP behaviour — and it's exactly the clean, un-fakeable signal we want. No
+  amount of injected input re-asserts HPD, so a `SendInput` macro can't defeat it.
+- **HDMI → often *not* detectable.** Many HDMI monitors keep the connection asserted when
+  switched off, so Windows still sees them as connected. If the household's monitors are HDMI,
+  physical power-off may be invisible to the OS and we need a fallback (below).
 
-Everything downstream (schema stores *both* signals raw; UI leads with monitor-on but shows
+**So the primary signal becomes "is the monitor still present in the display topology?"** —
+read via `QueryDisplayConfig` (count active paths / connected targets) each sample, plus a
+push notification via `WM_DISPLAYCHANGE` and `RegisterDeviceNotification(GUID_DEVINTERFACE_MONITOR)`.
+Keep `GUID_SESSION_DISPLAY_STATUS` too, as a **complementary** signal — it still catches the
+OS-driven display-off/sleep case. The stored `monitor_on` becomes: *a display is connected
+**and** its power state is on*. Either one going off ⇒ screen off.
+
+**Two consequences:**
+
+1. **Drop the "un-fakeable" framing; state the honest dependency.** Whether physical power-off is
+   detectable at all depends on the monitor + cable (DP vs HDMI). Present monitor-on in the UI as
+   the best available presence proxy with that caveat (see §7).
+2. **Validate empirically before building Phase 2 (≈30 lines, ~1 hour) — this is now the gating
+   spike.** On **one real household PC**, log *all three* candidate signals once a second —
+   `QueryDisplayConfig` active-monitor count, `GUID_SESSION_DISPLAY_STATUS`, and
+   `GetLastInputInfo` — and capture: (a) normal use, (b) walk away / idle timeout, (c) **power
+   the monitor off exactly the way the household does**, (d) run the household's **actual**
+   autoclicker with the monitor off. The decisive question: in (c)/(d), does the **active-monitor
+   count drop to 0** (or lose the primary)? If yes → use connection as primary, done. If no
+   (HDMI keeps it connected) → fall to the ladder below before building on it.
+
+**Fallback ladder if connection-detection doesn't fire (HDMI/quirky monitor):**
+- **DDC/CI power query (VCP `0xD6`)** over I2C — a physically-off monitor usually stops responding
+  to DDC, so a failed/`off` query is the signal. Flaky, per-monitor, slow; a fallback, not a
+  primary.
+- **Change the off-method** — if acceptable, having the user hit a "turn off display" hotkey
+  (software DPMS-off) instead of the physical button makes `GUID_SESSION_DISPLAY_STATUS` fire
+  cleanly. Changes a habit, so only if the above fail.
+- **Accept the limitation** — count `monitor_on AND active` as "confidently present" and treat a
+  known game running with perfectly regular input as "likely macro", surfaced as a separate
+  bucket rather than trusted screentime.
+
+Everything downstream (schema stores every signal raw; UI leads with monitor-on but shows
 input-active as a second layer; "confidently present" = `monitor_on AND active`, "likely
 macro/unattended" = `monitor_off` or `monitor_on AND idle`) is designed to stay correct
 regardless of how that validation lands.
@@ -200,13 +222,15 @@ Put **all** hard logic behind a platform-neutral core driven by a `Sampler` inte
 
 ```go
 type Reading struct {
-    TS         int64  // filled by the core, not the sampler
-    MonitorOn  int    // 0 off, 1 on, 2 dimmed
-    IsIdle     bool
-    IdleMS     int64
-    ExeName    string
-    WindowTitle string
+    TS            int64  // filled by the core, not the sampler
+    MonitorsActive int   // active-display count (primary presence signal, §4.4a)
+    DisplayPower  int    // GUID_SESSION_DISPLAY_STATUS: 0 off, 1 on, 2 dimmed (§4.4b)
+    IsIdle        bool
+    IdleMS        int64
+    ExeName       string
+    WindowTitle   string
 }
+// stored monitor_on = (MonitorsActive > 0) AND (DisplayPower != 0); both raw fields kept.
 type Sampler interface { Sample() (Reading, error) }
 ```
 
@@ -258,10 +282,31 @@ idle   = idleMs > 60_000;                      // 60s threshold matches the cade
 Store `idle_ms` **raw** (not just the boolean) so the idle threshold can be re-tuned
 server-side — this requires an `idle_ms` column in `samples` (§6.2).
 
-### 4.4 Monitor on/off — the primary signal (push-based, needs a real message pump)
+### 4.4 Monitor on/off — the primary signal (connection/presence first, power state second)
 
-Register on a **message-only window** (`CreateWindowExW` with `HWND_MESSAGE` — no UI, no
-taskbar entry):
+Per §0.1, the household **physically powers the monitor off**, so the primary signal is monitor
+**connection/presence**, with display **power state** as a complementary second signal. Both are
+read/maintained on one **message-only window** (`CreateWindowExW` with `HWND_MESSAGE` — no UI, no
+taskbar entry), pumped by a dedicated message-loop goroutine.
+
+**(a) Connection/presence — the primary signal for a physically powered-off monitor.**
+
+```
+// Sampled read: how many displays are actively connected right now?
+QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, ...);   // count active paths / connected targets
+//   (EnumDisplayDevices with DISPLAY_DEVICE_ACTIVE, or GetSystemMetrics(SM_CMONITORS), also work)
+// Push updates so we don't miss transitions between samples:
+//   WndProc handles WM_DISPLAYCHANGE, and
+RegisterDeviceNotification(msgWin, &GUID_DEVINTERFACE_MONITOR, DEVICE_NOTIFY_WINDOW_HANDLE);
+//   → on DBT_DEVICEARRIVAL / DBT_DEVICEREMOVECOMPLETE, re-query and cache the active count.
+```
+
+A DisplayPort monitor powered off drops out of the active topology (active count falls, to **0**
+for a single-monitor PC) — that's the clean signal we want, and injected input cannot re-assert
+it. **Whether this fires for the household's monitors is the gating unknown (DP yes, HDMI often
+no) and is what the §0.1 / Phase-0 spike measures.**
+
+**(b) Display power state — complementary, catches OS-driven display-off/sleep.**
 
 ```
 RegisterPowerSettingNotification(msgWin, &GUID_SESSION_DISPLAY_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
@@ -269,26 +314,32 @@ RegisterPowerSettingNotification(msgWin, &GUID_SESSION_DISPLAY_STATUS, DEVICE_NO
 //   read POWERBROADCAST_SETTING.Data[0] as DWORD: 0=off, 1=on, 2=dimmed. Cache it (atomic/mutex).
 ```
 
-> **Correction from the feasibility review:** `WM_POWERBROADCAST` only arrives if a thread is
-> **running a message loop** (`GetMessage`/`TranslateMessage`/`DispatchMessage`). If the
-> sampler just `time.Sleep`s for 60s and reads a cached value, nothing pumps messages and the
-> cache freezes forever. **Dedicate a goroutine with `runtime.LockOSThread()`** that creates
-> the window and runs a blocking message loop, updating an atomic cache; the sampler reads that
-> cache. Never create the window on a thread that then sleeps.
+Stored `monitor_on` = **(a display is connected) AND (its power state is on)**; either going off
+⇒ screen off.
+
+> **Correction from the feasibility review:** `WM_POWERBROADCAST` / `WM_DISPLAYCHANGE` only arrive
+> if a thread is **running a message loop** (`GetMessage`/`TranslateMessage`/`DispatchMessage`).
+> If the sampler just `time.Sleep`s for 60s and reads a cached value, nothing pumps messages and
+> the cache freezes forever. **Dedicate a goroutine with `runtime.LockOSThread()`** that creates
+> the window and runs a blocking message loop, updating atomic caches; the sampler reads those
+> caches. Never create the window on a thread that then sleeps.
 
 Details:
-- `RegisterPowerSettingNotification` delivers an immediate callback with the current value, so
-  no explicit seeding is needed. **Re-check on resume** (`PBT_APM_RESUMEAUTOMATIC` /
-  `RESUMESUSPEND`) — the cached state can be stale right after sleep.
-- Treat `2 = dimmed` as **on** for presence, but weight it weakly (dim = approaching the idle
-  timeout, i.e. weak evidence of *absence*, not presence).
-- **RDP / disconnect / fast-user-switch staleness:** a per-session display-status cache can get
-  stuck at "on" when a session is disconnected (RDP drop, fast-user-switch away) because change
-  notifications stop. Wire `WTSRegisterSessionNotification` (same window) and, on
-  `WTS_CONSOLE_DISCONNECT` / `WTS_REMOTE_DISCONNECT` / `WTS_SESSION_LOCK` /
-  `WTS_SESSION_LOGOFF`, force monitor state to **off/unknown**. Only count monitor-on while
-  your session is the **active console session** (`WTSGetActiveConsoleSessionId`) — this also
-  prevents two simultaneous sessions from both claiming the one physical monitor (§4.7).
+- `RegisterPowerSettingNotification` delivers an immediate callback with the current value; also
+  seed the connected-count from an initial `QueryDisplayConfig`. **Re-check both on resume**
+  (`PBT_APM_RESUMEAUTOMATIC` / `RESUMESUSPEND`) — caches can be stale right after sleep.
+- Treat power-state `2 = dimmed` as **on** for presence, but weight it weakly (dim = approaching
+  the idle timeout, i.e. weak evidence of *absence*, not presence).
+- **RDP / disconnect / fast-user-switch staleness:** a per-session cache can get stuck at "on"
+  when a session is disconnected (RDP drop, fast-user-switch away) because notifications stop.
+  Wire `WTSRegisterSessionNotification` (same window) and, on `WTS_CONSOLE_DISCONNECT` /
+  `WTS_REMOTE_DISCONNECT` / `WTS_SESSION_LOCK` / `WTS_SESSION_LOGOFF`, force monitor state to
+  **off/unknown**. Only count monitor-on while your session is the **active console session**
+  (`WTSGetActiveConsoleSessionId`) — this also prevents two simultaneous sessions from both
+  claiming the one physical monitor (§4.7).
+- **HDMI fallback (only if the spike shows connection doesn't drop):** probe DDC/CI power mode
+  (VCP `0xD6`) — a physically-off monitor typically stops answering DDC, so a failed/`off` query
+  becomes the signal. Flaky and per-monitor; a fallback, not the primary (see §0.1 ladder).
 
 ### 4.5 Exact minutes via transition events (not just 1/min snapshots)
 
@@ -495,7 +546,9 @@ CREATE TABLE samples (
     device_id    INTEGER NOT NULL REFERENCES devices(id),
     user_name    TEXT,                            -- per-person attribution on shared PCs
     ts           INTEGER NOT NULL,                -- unix seconds, server-clamped (§6.3)
-    monitor_on   INTEGER NOT NULL,                -- 1=on (2 dimmed→on) ← PRIMARY signal
+    monitor_on   INTEGER NOT NULL,                -- derived: monitors_active>0 AND display_power!=0 ← PRIMARY
+    monitors_active INTEGER,                      -- raw active-display count (§4.4a) — the physical-off signal
+    display_power   INTEGER,                      -- raw GUID_SESSION_DISPLAY_STATUS 0/1/2 (§4.4b)
     is_idle      INTEGER NOT NULL,                -- ← SECONDARY signal
     idle_ms      INTEGER,                         -- raw, so the threshold can be re-tuned
     exe_name     TEXT,
@@ -839,11 +892,15 @@ Each phase is independently verifiable and keeps the system runnable. Don't enro
 machine until Phase 1's update security exists.
 
 ### Phase 0 — Walking skeleton + validate the core premise
-- **Signal-validation spike (§0.1) — do this before anything else.** A ~20-line probe on one real
-  household PC logging `GUID_SESSION_DISPLAY_STATUS` + `GetLastInputInfo` once a second; capture
-  the four traces (normal use / walk-away timeout / monitor-off-as-they-do-it / real autoclicker).
-  Confirm monitor-off actually fires for the household's behaviour. **If it doesn't, redesign the
-  metric before building on it.**
+- **Signal-validation spike (§0.1) — do this before anything else, it is the gating risk.** A
+  ~30-line probe on one real household PC logging **all three** candidate signals once a second —
+  `QueryDisplayConfig` active-monitor count, `GUID_SESSION_DISPLAY_STATUS`, and
+  `GetLastInputInfo`; capture the four traces (normal use / walk-away timeout / **physically power
+  the monitor off the way the household does** / real autoclicker running with the monitor off).
+  **The decisive check:** does the active-monitor count drop to 0 when the monitor is powered off?
+  If yes → connection-presence is the primary signal, proceed. If no (HDMI keeps it connected) →
+  work the §0.1 fallback ladder (DDC/CI probe, changed off-method, or accept-and-bucket) **before**
+  building Phase 2 on it.
 - Go monorepo: `cmd/fabscreentimed`, `cmd/agent`, `internal/shared` (JSON contract). `Sampler`
   interface + Linux stub (§4.1) so the agent builds/tests on CI.
 - Backend: `net/http.ServeMux` + `modernc.org/sqlite`, `devices` + `samples`, `POST /api/ingest`
@@ -866,11 +923,13 @@ machine until Phase 1's update security exists.
   unsigned/mismatched manifest, a downgrade, and an off-origin URL.
 
 ### Phase 2 — Monitor signal + silent autostart (the core insight, made real)
-- Message-only window + **message-pump goroutine** (`LockOSThread`) +
-  `RegisterPowerSettingNotification(GUID_SESSION_DISPLAY_STATUS)`; atomic cache; re-check on
-  resume. `WTSRegisterSessionNotification` → force off/unknown on disconnect/lock; count only the
-  active console session. Add `monitor_on` + `idle_ms` to samples and `monitor_events` transitions
-  (§4.5). Fix idle math to 32-bit unsigned (§4.3).
+- Message-only window + **message-pump goroutine** (`LockOSThread`). **Primary:** connection
+  presence via `QueryDisplayConfig` + `WM_DISPLAYCHANGE` + `RegisterDeviceNotification(GUID_DEVINTERFACE_MONITOR)`
+  (§4.4a). **Complementary:** `RegisterPowerSettingNotification(GUID_SESSION_DISPLAY_STATUS)`
+  (§4.4b); atomic caches; re-check both on resume. `WTSRegisterSessionNotification` → force
+  off/unknown on disconnect/lock; count only the active console session. Store raw
+  `monitors_active` + `display_power` + derived `monitor_on` + `idle_ms`, plus `monitor_events`
+  transitions (§4.5). Fix idle math to 32-bit unsigned (§4.3).
 - Hidden per-user "At log on" Scheduled Task (LIMITED, restart-on-failure, battery-safe);
   self-copy to `%LOCALAPPDATA%`. DPAPI-encrypt the token; clock reconciliation via `server_time`.
 - Nightly **dirty-days** rollup → `daily_stats` + `daily_app_stats` (purge deferred).
@@ -931,9 +990,11 @@ machine until Phase 1's update security exists.
 
 ## Appendix — the biggest changes the review pass produced
 
-1. **Reframed the core metric honestly** and added a Phase-0 validation spike — monitor-on is the
-   OS *logical* display state, not physical panel power, and its trustworthiness depends on the
-   household's actual macro-injection method (§0.1). *This is the most important change.*
+1. **Repointed the core metric from display *power state* to monitor *connection/presence*** and
+   added a Phase-0 validation spike — because the user physically powers the monitor off, which
+   `GUID_SESSION_DISPLAY_STATUS` does *not* detect. Connection loss (`QueryDisplayConfig`) does,
+   but only on DisplayPort (HDMI often keeps the link up), so it must be tested on the household's
+   actual hardware (§0.1). *This is the most important change.*
 2. **Windows correctness fixes:** a real message-pump goroutine (or the monitor cache never
    updates); 32-bit unsigned idle math; `OpenProcess` fallback; RDP/disconnect/active-console
    handling; self-update mutex + relaunch backoff; `session_minutes` (not "powered").
