@@ -33,3 +33,57 @@ not on **HDMI** — so the metric must be validated on the real hardware first. 
 Deploy only on machines you own or are authorized to monitor (household self-monitoring / parental
 oversight). Never keylogs — only window titles + activity flags. Not for corporate/EDR-managed
 devices. See [PLAN.md §9](./PLAN.md).
+
+---
+
+## Development
+
+Requires Go (see `go.mod` for the version). Pure-Go dependencies only — no cgo, no C toolchain.
+
+### Layout
+
+```
+cmd/fabscreentimed   backend: JSON API + dashboard + SQLite, one static binary
+cmd/agent            Windows agent (stub sampler on non-Windows so it runs on CI/dev)
+cmd/montest          Phase 0 monitor-signal probe (Windows-only) — see PLAN.md §0.1
+internal/shared      JSON contract shared by agent and backend
+internal/agent       platform-neutral agent core, Sampler interface, bounded queue, uploader
+internal/server      HTTP handlers, SQLite store, placeholder dashboard
+```
+
+The agent's hard logic sits behind a `Sampler` interface with a real Win32 implementation
+(`sampler_windows.go`) and a Linux stub (`sampler_stub.go`), so everything builds and tests on any
+OS (PLAN.md §4.1).
+
+### Build, test, run
+
+```bash
+go test ./...                      # unit tests (Linux/macOS/Windows)
+go run ./cmd/fabscreentimed        # backend on :8080, SQLite at ./fabscreentime.db
+go run ./cmd/agent -server http://localhost:8080 -interval 5s   # stub agent → backend
+```
+
+Open <http://localhost:8080> for the placeholder dashboard. `scripts/build.sh [version]` produces
+the Linux backend plus the silent (`-H=windowsgui`) Windows `agent.exe` and `montest.exe` in
+`dist/`.
+
+### Phase 0: validate the monitor signal first
+
+The one gating question (PLAN.md §0.1) is whether physically powering a monitor off is detectable.
+Build and run the probe on a real Windows PC, then power the monitor off for ~30s and back on:
+
+```
+GOOS=windows GOARCH=amd64 go build -o montest.exe ./cmd/montest
+montest.exe            # logs monitors_active + idle_ms once/second to montest.csv
+```
+
+If `monitors_active` drops to 0 while the monitor is off, connection-presence is a clean signal for
+that machine (typical of DisplayPort). If it stays put (typical of HDMI), that machine needs the
+fallback ladder in PLAN.md §4.4c. Test at least one DisplayPort and one HDMI PC.
+
+### Status
+
+Phase 0 (walking skeleton) is implemented: agent sampling + bounded offline queue, batched
+idempotent ingest with timestamp clamping, per-device summary aggregates, a no-build placeholder
+dashboard, and CI that runs the real Win32 code on a Windows runner. Next up is Phase 1 (the signed
+auto-update firebreak) — see the roadmap in [PLAN.md §10](./PLAN.md).

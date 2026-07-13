@@ -1,0 +1,18 @@
+# Build output
+/bin/
+/dist/
+*.exe
+
+# Local runtime state
+*.db
+*.db-wal
+*.db-shm
+montest.csv
+/.fabscreentime/
+queue.json
+device_id
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

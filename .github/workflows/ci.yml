@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-test:
+    name: Build & test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify formatting
+        run: |
+          fmt=$(gofmt -l .)
+          if [ -n "$fmt" ]; then echo "gofmt needed on:"; echo "$fmt"; exit 1; fi
+      - run: go vet ./...
+      - run: go test ./... -count=1
+      - name: Cross-compile Windows agent (GUI subsystem, silent)
+        run: GOOS=windows GOARCH=amd64 go build -ldflags "-s -w -H=windowsgui" -o /dev/null ./cmd/agent
+
+  windows-smoke:
+    name: Smoke run (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build ./...
+      - run: go test ./... -count=1
+      # Actually execute the real Win32 code paths on a Windows runner so a
+      # broken syscall can't merge silently (PLAN.md §4.1 / Phase 0).
+      - name: Agent samples once
+        run: go run ./cmd/agent -once
+      - name: Monitor probe samples once
+        run: go run ./cmd/montest -once
