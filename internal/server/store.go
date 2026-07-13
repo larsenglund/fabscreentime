@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver, registered as "sqlite"
 
@@ -45,6 +46,30 @@ CREATE TABLE IF NOT EXISTS samples (
 ) WITHOUT ROWID;
 
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
+
+CREATE TABLE IF NOT EXISTS monitor_events (
+    device_id  INTEGER NOT NULL REFERENCES devices(id),
+    ts         INTEGER NOT NULL,
+    monitor_on INTEGER NOT NULL,
+    PRIMARY KEY (device_id, ts)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS daily_stats (
+    device_id       INTEGER NOT NULL REFERENCES devices(id),
+    day             TEXT NOT NULL,
+    monitor_minutes INTEGER NOT NULL DEFAULT 0,
+    active_minutes  INTEGER NOT NULL DEFAULT 0,
+    session_minutes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS daily_app_stats (
+    device_id       INTEGER NOT NULL REFERENCES devices(id),
+    day             TEXT NOT NULL,
+    exe_name        TEXT NOT NULL,
+    monitor_minutes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_id, day, exe_name)
+);
 `
 
 // Store wraps the SQLite database.
@@ -101,11 +126,12 @@ func (s *Store) UpsertDevice(uuid, hostname, version string, now int64) (int64, 
 
 // InsertSamples inserts a batch idempotently (INSERT OR IGNORE on the (device,ts)
 // PK dedups retried batches). Timestamps are clamped/rejected against serverNow.
-// Returns the number of rows actually inserted.
-func (s *Store) InsertSamples(deviceID int64, samples []shared.Sample, serverNow int64) (int, error) {
+// Returns rows inserted and the set of UTC days touched (for dirty-days rollup).
+func (s *Store) InsertSamples(deviceID int64, samples []shared.Sample, serverNow int64) (int, map[string]bool, error) {
+	days := map[string]bool{}
 	tx, err := s.db.Begin()
 	if err != nil {
-		return 0, err
+		return 0, days, err
 	}
 	defer tx.Rollback()
 
@@ -114,7 +140,7 @@ func (s *Store) InsertSamples(deviceID int64, samples []shared.Sample, serverNow
 			(device_id, ts, monitor_on, monitors_active, display_power, is_idle, idle_ms, exe_name, window_title)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		return 0, err
+		return 0, days, err
 	}
 	defer stmt.Close()
 
@@ -129,15 +155,188 @@ func (s *Store) InsertSamples(deviceID int64, samples []shared.Sample, serverNow
 			boolToInt(smp.IsIdle), smp.IdleMS, smp.Exe, truncate(smp.Title, maxTitleLen),
 		)
 		if err != nil {
-			return accepted, err
+			return accepted, days, err
 		}
-		n, _ := res.RowsAffected()
-		accepted += int(n)
+		if n, _ := res.RowsAffected(); n > 0 {
+			accepted++
+			days[DayUTC(smp.ClientTS)] = true
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return accepted, err
+		return accepted, days, err
 	}
-	return accepted, nil
+	return accepted, days, nil
+}
+
+// InsertMonitorEvents inserts on/off transition events idempotently, clamping
+// timestamps like samples. Returns rows inserted and the set of UTC days touched
+// (for the dirty-days rollup, PLAN.md §6.3).
+func (s *Store) InsertMonitorEvents(deviceID int64, events []shared.MonitorEvent, serverNow int64) (int, map[string]bool, error) {
+	days := map[string]bool{}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, days, err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO monitor_events (device_id, ts, monitor_on) VALUES (?, ?, ?)`)
+	if err != nil {
+		return 0, days, err
+	}
+	defer stmt.Close()
+
+	accepted := 0
+	for _, e := range events {
+		if e.ClientTS < serverNow-maxBackdateSecs || e.ClientTS > serverNow+maxFutureSecs {
+			continue
+		}
+		on := 0
+		if e.MonitorOn != 0 {
+			on = 1
+		}
+		res, err := stmt.Exec(deviceID, e.ClientTS, on)
+		if err != nil {
+			return accepted, days, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			accepted++
+			days[DayUTC(e.ClientTS)] = true
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return accepted, days, err
+	}
+	return accepted, days, nil
+}
+
+// DayUTC formats a unix timestamp as YYYY-MM-DD in UTC. (Phase 2 uses UTC; a
+// configurable household timezone is a later refinement — PLAN.md §6.2.)
+func DayUTC(ts int64) string {
+	return time.Unix(ts, 0).UTC().Format("2006-01-02")
+}
+
+// MonitorOnSeconds returns the exact number of seconds the monitor was on in
+// [from, to), integrated from the transition events (PLAN.md §4.5). The state at
+// `from` is taken from the most recent event at or before it; if there is none,
+// the monitor is assumed off until the first recorded transition.
+func (s *Store) MonitorOnSeconds(deviceID, from, to int64) (int64, error) {
+	if to <= from {
+		return 0, nil
+	}
+	// Initial state = last event at/before `from`.
+	state := 0
+	var prevTS int64
+	err := s.db.QueryRow(
+		`SELECT monitor_on FROM monitor_events WHERE device_id=? AND ts<=? ORDER BY ts DESC LIMIT 1`,
+		deviceID, from).Scan(&state)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	prevTS = from
+
+	rows, err := s.db.Query(
+		`SELECT ts, monitor_on FROM monitor_events WHERE device_id=? AND ts>? AND ts<? ORDER BY ts`,
+		deviceID, from, to)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	var onSecs int64
+	for rows.Next() {
+		var ts int64
+		var on int
+		if err := rows.Scan(&ts, &on); err != nil {
+			return 0, err
+		}
+		if state == 1 {
+			onSecs += ts - prevTS
+		}
+		state = on
+		prevTS = ts
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if state == 1 {
+		onSecs += to - prevTS
+	}
+	return onSecs, nil
+}
+
+// RollupDay recomputes the permanent daily aggregates for one device/day from raw
+// samples (and exact monitor-on from events when any exist for that day). It is
+// idempotent, so re-running it for a late-arriving backlog is safe. The window is
+// capped at `now` so an unterminated "on" interval on the current day isn't
+// integrated into the future (which would massively overcount today's minutes).
+func (s *Store) RollupDay(deviceID int64, day string, now int64) error {
+	dayStart, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		return err
+	}
+	from := dayStart.UTC().Unix()
+	to := from + 86400
+	if now < to {
+		to = now
+	}
+	if to <= from {
+		return nil // day is entirely in the future; nothing to roll up yet
+	}
+
+	var monitorMin, activeMin, sessionMin int
+	err = s.db.QueryRow(`
+		SELECT COALESCE(SUM(CASE WHEN monitor_on=1 THEN 1 ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN monitor_on=1 AND is_idle=0 THEN 1 ELSE 0 END),0),
+		       COUNT(*)
+		FROM samples WHERE device_id=? AND ts>=? AND ts<?`, deviceID, from, to).
+		Scan(&monitorMin, &activeMin, &sessionMin)
+	if err != nil {
+		return err
+	}
+
+	// Prefer exact monitor-on minutes from transition events when present.
+	var eventCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM monitor_events WHERE device_id=? AND ts>=? AND ts<?`,
+		deviceID, from, to).Scan(&eventCount); err != nil {
+		return err
+	}
+	if eventCount > 0 {
+		secs, err := s.MonitorOnSeconds(deviceID, from, to)
+		if err != nil {
+			return err
+		}
+		monitorMin = int((secs + 30) / 60) // round to nearest minute
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
+		INSERT INTO daily_stats (device_id, day, monitor_minutes, active_minutes, session_minutes)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(device_id, day) DO UPDATE SET
+			monitor_minutes=excluded.monitor_minutes,
+			active_minutes=excluded.active_minutes,
+			session_minutes=excluded.session_minutes`,
+		deviceID, day, monitorMin, activeMin, sessionMin); err != nil {
+		return err
+	}
+
+	// Per-app rollup: replace this day's rows.
+	if _, err := tx.Exec(`DELETE FROM daily_app_stats WHERE device_id=? AND day=?`, deviceID, day); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO daily_app_stats (device_id, day, exe_name, monitor_minutes)
+		SELECT device_id, ?, COALESCE(exe_name,''), COUNT(*)
+		FROM samples WHERE device_id=? AND ts>=? AND ts<? AND monitor_on=1
+		GROUP BY exe_name`, day, deviceID, from, to); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // DeviceSummary is one row of the dashboard overview.

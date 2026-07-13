@@ -108,5 +108,13 @@ Drop `agent.exe` + `manifest.json` into the backend's `-agentdir`; it serves the
   anti-rollback, same-origin download enforcement, fail-closed verify-before-swap, offline signing
   CLI. Tested end to end (valid update applies; tampered / unsigned / downgrade / off-origin /
   wrong-hash all rejected before the binary is touched).
+- **Phase 2 (monitor signal + silent autostart):** connection-based monitor detection
+  (`GetSystemMetrics(SM_CMONITORS)`, polled — the primary physical-power-off signal, no message pump
+  needed), a transition poller emitting exact on/off `monitor_events`, exact-interval monitor-on
+  minutes (capped at now), the nightly **dirty-days** rollup engine (`daily_stats` /
+  `daily_app_stats`), and hidden per-user "at logon" Scheduled-Task autostart (`agent -install` /
+  `-uninstall`). *Deferred pending on-hardware validation:* the display-power (DPMS) message-pump
+  watcher — until then `display_power` is unknown and `monitor_on` falls back to the connection
+  count, which is exactly the signal that detects a physical power-off.
 
-Next: Phase 2 (monitor signal + silent autostart) — see the roadmap in [PLAN.md §10](./PLAN.md).
+Next: Phase 3 (auth, enrollment & per-device tokens) — see the roadmap in [PLAN.md §10](./PLAN.md).

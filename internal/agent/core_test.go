@@ -13,6 +13,7 @@ import (
 type fakeUploader struct {
 	fail       bool
 	gotBatch   int
+	gotEvents  int
 	gotBuild   int64
 	serverTS   int64
 	updateSM   *shared.SignedManifest
@@ -24,6 +25,7 @@ func (f *fakeUploader) Upload(_ context.Context, req shared.IngestRequest) (shar
 		return shared.IngestResponse{}, errors.New("network down")
 	}
 	f.gotBatch = len(req.Samples)
+	f.gotEvents = len(req.Events)
 	f.gotBuild = req.AgentBuild
 	return shared.IngestResponse{
 		Accepted:   len(req.Samples),
@@ -140,6 +142,36 @@ func TestUpdaterInvokedOnlyWhenManifestPresent(t *testing.T) {
 	}
 	if up.lastSM.Manifest.Version != "9.9.9" {
 		t.Fatalf("updater got manifest %q, want 9.9.9", up.lastSM.Manifest.Version)
+	}
+}
+
+func TestMonitorTransitionsDedupedBufferedAndFlushed(t *testing.T) {
+	up := &fakeUploader{}
+	a, _, _ := newTestAgentWithUpdater(t, up, nil)
+
+	a.recordTransition(1, 100) // seed off(-1)→on: event
+	a.recordTransition(1, 160) // no change: deduped
+	a.recordTransition(0, 200) // on→off: event
+	if got := len(a.snapshotEvents()); got != 2 {
+		t.Fatalf("buffered events = %d, want 2 (deduped)", got)
+	}
+
+	a.Tick(context.Background()) // successful flush uploads samples + events
+	if up.gotEvents != 2 {
+		t.Fatalf("uploaded events = %d, want 2", up.gotEvents)
+	}
+	if got := len(a.snapshotEvents()); got != 0 {
+		t.Fatalf("events not cleared after successful flush: %d", got)
+	}
+}
+
+func TestMonitorEventsRetainedOnUploadFailure(t *testing.T) {
+	up := &fakeUploader{fail: true}
+	a, _, _ := newTestAgentWithUpdater(t, up, nil)
+	a.recordTransition(0, 100)
+	a.Tick(context.Background()) // upload fails
+	if got := len(a.snapshotEvents()); got != 1 {
+		t.Fatalf("events lost on failed upload: have %d, want 1 retained", got)
 	}
 }
 

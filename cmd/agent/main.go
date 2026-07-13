@@ -33,8 +33,10 @@ var (
 func main() {
 	server := flag.String("server", "http://localhost:8080", "backend base URL")
 	interval := flag.Duration("interval", time.Minute, "sample interval")
-	dataDir := flag.String("datadir", defaultDataDir(), "directory for device id + queue")
+	dataDir := flag.String("datadir", agent.InstallDir(), "directory for device id + queue")
 	once := flag.Bool("once", false, "sample once, print the reading as JSON, and exit (CI smoke test)")
+	install := flag.Bool("install", false, "install silent autostart (hidden logon Scheduled Task) and exit")
+	uninstall := flag.Bool("uninstall", false, "remove the autostart Scheduled Task and exit")
 	flag.Parse()
 
 	if *once {
@@ -44,6 +46,21 @@ func main() {
 		}
 		b, _ := json.MarshalIndent(r, "", "  ")
 		fmt.Println(string(b))
+		return
+	}
+
+	if *install {
+		if err := agent.Install(*server); err != nil {
+			log.Fatalf("install: %v", err)
+		}
+		log.Printf("installed and started; reporting to %s", *server)
+		return
+	}
+	if *uninstall {
+		if err := agent.Uninstall(); err != nil {
+			log.Fatalf("uninstall: %v", err)
+		}
+		log.Print("uninstalled autostart task")
 		return
 	}
 
@@ -109,11 +126,4 @@ func loadOrCreateDeviceID(path string) (string, error) {
 		return "", err
 	}
 	return id, nil
-}
-
-func defaultDataDir() string {
-	if d, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(d, "FabScreenTime")
-	}
-	return ".fabscreentime"
 }

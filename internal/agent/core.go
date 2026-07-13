@@ -3,15 +3,25 @@ package agent
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/larsenglund/fabscreentime/internal/shared"
 )
 
+const maxPendingEvents = 4096 // bounded so a long outage can't grow it unbounded
+
 // Uploader sends a batch to the backend and returns the parsed response.
 // Abstracted so the core can be tested without a real HTTP server.
 type Uploader interface {
 	Upload(ctx context.Context, req shared.IngestRequest) (shared.IngestResponse, error)
+}
+
+// MonitorProber reports the composite monitor-on state (1 on, 0 off) cheaply, so
+// the core can poll it faster than the 1/min sample cadence and emit precise
+// on/off transition events (PLAN.md §4.5). Optional: only Windows implements it.
+type MonitorProber interface {
+	MonitorOn() int
 }
 
 // Config holds the agent's runtime parameters.
@@ -21,6 +31,7 @@ type Config struct {
 	AgentVersion string
 	Build        int64 // monotonic build number, reported to the backend and used by the updater
 	Interval     time.Duration
+	MonitorPoll  time.Duration    // how often to poll for monitor on/off transitions
 	Now          func() time.Time // injectable for tests
 }
 
@@ -33,6 +44,10 @@ type Agent struct {
 	uploader  Uploader
 	updater   Updater // may be nil (e.g. no pinned keys, or in tests)
 	clockSkew time.Duration
+
+	mu            sync.Mutex
+	pendingEvents []shared.MonitorEvent
+	lastMonitorOn int // -1 unknown, else last observed composite state
 }
 
 // New wires an agent together. updater may be nil to disable self-update.
@@ -43,7 +58,57 @@ func New(cfg Config, s Sampler, q *Queue, u Uploader, up Updater) *Agent {
 	if cfg.Interval <= 0 {
 		cfg.Interval = time.Minute
 	}
-	return &Agent{cfg: cfg, sampler: s, queue: q, uploader: u, updater: up}
+	if cfg.MonitorPoll <= 0 {
+		cfg.MonitorPoll = 10 * time.Second
+	}
+	return &Agent{cfg: cfg, sampler: s, queue: q, uploader: u, updater: up, lastMonitorOn: -1}
+}
+
+// recordTransition appends a monitor on/off event if the composite state changed.
+func (a *Agent) recordTransition(on int, ts int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if on == a.lastMonitorOn {
+		return
+	}
+	a.lastMonitorOn = on
+	a.pendingEvents = append(a.pendingEvents, shared.MonitorEvent{ClientTS: ts, MonitorOn: on})
+	if len(a.pendingEvents) > maxPendingEvents {
+		a.pendingEvents = append(a.pendingEvents[:0], a.pendingEvents[len(a.pendingEvents)-maxPendingEvents:]...)
+	}
+}
+
+func (a *Agent) snapshotEvents() []shared.MonitorEvent {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]shared.MonitorEvent, len(a.pendingEvents))
+	copy(out, a.pendingEvents)
+	return out
+}
+
+func (a *Agent) ackEvents(n int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if n >= len(a.pendingEvents) {
+		a.pendingEvents = nil
+	} else {
+		a.pendingEvents = append(a.pendingEvents[:0], a.pendingEvents[n:]...)
+	}
+}
+
+// monitorPollLoop polls the composite monitor state and records transitions.
+func (a *Agent) monitorPollLoop(ctx context.Context, p MonitorProber) {
+	t := time.NewTicker(a.cfg.MonitorPoll)
+	defer t.Stop()
+	a.recordTransition(p.MonitorOn(), a.cfg.Now().Unix()) // seed
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			a.recordTransition(p.MonitorOn(), a.cfg.Now().Unix())
+		}
+	}
 }
 
 // deriveMonitorOn collapses the two raw monitor signals into a 0/1 the way the
@@ -84,7 +149,8 @@ func (a *Agent) Tick(ctx context.Context) {
 
 func (a *Agent) flush(ctx context.Context) {
 	batch := a.queue.Snapshot()
-	if len(batch) == 0 {
+	events := a.snapshotEvents()
+	if len(batch) == 0 && len(events) == 0 {
 		return
 	}
 	resp, err := a.uploader.Upload(ctx, shared.IngestRequest{
@@ -93,14 +159,16 @@ func (a *Agent) flush(ctx context.Context) {
 		DeviceUUID:   a.cfg.DeviceUUID,
 		Hostname:     a.cfg.Hostname,
 		Samples:      batch,
+		Events:       events,
 	})
 	if err != nil {
-		log.Printf("upload failed (%d queued): %v", len(batch), err)
+		log.Printf("upload failed (%d samples, %d events queued): %v", len(batch), len(events), err)
 		return
 	}
 	if err := a.queue.Ack(len(batch)); err != nil {
 		log.Printf("ack error: %v", err)
 	}
+	a.ackEvents(len(events))
 	if resp.ServerTime > 0 {
 		a.clockSkew = time.Duration(resp.ServerTime-a.cfg.Now().Unix()) * time.Second
 	}
@@ -119,8 +187,12 @@ func (a *Agent) flush(ctx context.Context) {
 // ClockSkew returns the last observed offset between server and local clocks.
 func (a *Agent) ClockSkew() time.Duration { return a.clockSkew }
 
-// Run samples immediately, then every interval until ctx is cancelled.
+// Run samples immediately, then every interval until ctx is cancelled. If the
+// sampler can probe monitor state, a faster poll loop records on/off transitions.
 func (a *Agent) Run(ctx context.Context) {
+	if p, ok := a.sampler.(MonitorProber); ok {
+		go a.monitorPollLoop(ctx, p)
+	}
 	a.Tick(ctx)
 	t := time.NewTicker(a.cfg.Interval)
 	defer t.Stop()

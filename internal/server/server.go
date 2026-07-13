@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/larsenglund/fabscreentime/internal/shared"
@@ -15,18 +17,26 @@ import (
 
 const maxIngestBytes = 1 << 20 // 1 MiB body cap (PLAN.md §6.3)
 
+type dirtyKey struct {
+	deviceID int64
+	day      string
+}
+
 // Server holds the HTTP handlers and their dependencies.
 type Server struct {
 	store    *Store
 	now      func() time.Time
 	agentDir string                 // holds manifest.json + agent.exe (may be empty)
 	manifest *shared.SignedManifest // current signed release, loaded at startup
+
+	mu    sync.Mutex
+	dirty map[dirtyKey]bool // (device, day) pairs whose rollup is stale
 }
 
 // New returns a Server backed by store. agentDir, if non-empty, is scanned for a
 // signed agent release (manifest.json + agent.exe) to serve for auto-update.
 func New(store *Store, agentDir string) *Server {
-	s := &Server{store: store, now: time.Now, agentDir: agentDir}
+	s := &Server{store: store, now: time.Now, agentDir: agentDir, dirty: map[dirtyKey]bool{}}
 	s.loadManifest()
 	return s
 }
@@ -84,17 +94,74 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
-	accepted, err := s.store.InsertSamples(id, req.Samples, now)
+	accepted, sampleDays, err := s.store.InsertSamples(id, req.Samples, now)
 	if err != nil {
 		log.Printf("insert samples: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
+	_, eventDays, err := s.store.InsertMonitorEvents(id, req.Events, now)
+	if err != nil {
+		log.Printf("insert events: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	s.markDirty(id, sampleDays, eventDays)
+
 	writeJSON(w, http.StatusOK, shared.IngestResponse{
 		Accepted:   accepted,
 		ServerTime: now,
 		Update:     s.updateFor(req.AgentBuild),
 	})
+}
+
+// markDirty records (device, day) pairs whose daily rollup needs recomputing.
+// Tracking exactly which days each ingest touched — including a late backlog
+// dated days ago — is what stops the rollup from silently dropping those minutes
+// (PLAN.md §6.3, "dirty days").
+func (s *Server) markDirty(deviceID int64, daySets ...map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, set := range daySets {
+		for day := range set {
+			s.dirty[dirtyKey{deviceID, day}] = true
+		}
+	}
+}
+
+// RunRollups recomputes every dirty (device, day) rollup and clears the set.
+func (s *Server) RunRollups() {
+	s.mu.Lock()
+	pending := s.dirty
+	s.dirty = map[dirtyKey]bool{}
+	s.mu.Unlock()
+
+	now := s.now().Unix()
+	for k := range pending {
+		if err := s.store.RollupDay(k.deviceID, k.day, now); err != nil {
+			log.Printf("rollup device=%d day=%s: %v", k.deviceID, k.day, err)
+			// Re-mark so a transient failure is retried next cycle.
+			s.mu.Lock()
+			s.dirty[k] = true
+			s.mu.Unlock()
+		}
+	}
+}
+
+// StartRollupLoop runs RunRollups on interval until ctx is cancelled.
+func (s *Server) StartRollupLoop(ctx context.Context, interval time.Duration) {
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				s.RunRollups()
+			}
+		}
+	}()
 }
 
 // updateFor returns the signed update block. The agent re-verifies the manifest

@@ -21,6 +21,7 @@ func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dbPath := flag.String("db", "fabscreentime.db", "path to the SQLite database")
 	agentDir := flag.String("agentdir", "", "directory holding the signed agent release (manifest.json + agent.exe)")
+	rollupEvery := flag.Duration("rollup", time.Hour, "how often to recompute dirty daily rollups")
 	flag.Parse()
 
 	store, err := server.OpenStore(*dbPath)
@@ -29,14 +30,17 @@ func main() {
 	}
 	defer store.Close()
 
-	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           server.New(store, *agentDir).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	app := server.New(store, *agentDir)
+	app.StartRollupLoop(ctx, *rollupEvery)
+
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           app.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
 	go func() {
 		log.Printf("fabscreentimed listening on %s (db=%s)", *addr, *dbPath)

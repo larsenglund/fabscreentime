@@ -19,13 +19,22 @@ type Sample struct {
 	Title          string `json:"title"`
 }
 
+// MonitorEvent records the exact instant the monitor's on/off state changed
+// (PLAN.md §4.5). Integrating these intervals gives an exact monitor-on metric,
+// where counting 1/min samples only approximates it to ±60s.
+type MonitorEvent struct {
+	ClientTS  int64 `json:"client_ts"`
+	MonitorOn int   `json:"monitor_on"` // 1 = on, 0 = off
+}
+
 // IngestRequest is the body of POST /api/ingest — the agent's single periodic call.
 type IngestRequest struct {
-	AgentVersion string   `json:"agent_version"`
-	AgentBuild   int64    `json:"agent_build"` // monotonic build number, for the update-availability hint
-	DeviceUUID   string   `json:"device_uuid"` // Phase 0 identity; replaced by per-device tokens in Phase 3
-	Hostname     string   `json:"hostname"`
-	Samples      []Sample `json:"samples"`
+	AgentVersion string         `json:"agent_version"`
+	AgentBuild   int64          `json:"agent_build"` // monotonic build number, for the update-availability hint
+	DeviceUUID   string         `json:"device_uuid"` // Phase 0 identity; replaced by per-device tokens in Phase 3
+	Hostname     string         `json:"hostname"`
+	Samples      []Sample       `json:"samples"`
+	Events       []MonitorEvent `json:"events"`
 }
 
 // Manifest describes an agent release. Every field is covered by the signature

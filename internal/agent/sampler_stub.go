@@ -36,3 +36,6 @@ func (s *stubSampler) Sample() (Reading, error) {
 		WindowTitle:    app.title,
 	}, nil
 }
+
+// MonitorOn reports the composite monitor state. The stub always reports "on".
+func (s *stubSampler) MonitorOn() int { return 1 }

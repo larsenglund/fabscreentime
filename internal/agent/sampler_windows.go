@@ -9,10 +9,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Real Win32 sampler: foreground window (title + owning exe) and input idle.
-// Monitor on/off is intentionally NOT sampled here in Phase 0 — it needs a
-// message pump and per-device connection/power logic, which lands in Phase 2
-// (PLAN.md §4.4). The cmd/montest probe validates the monitor signal first.
+// Real Win32 sampler: foreground window (title + owning exe), input idle, and
+// monitor connection count. The primary monitor signal is the connected-display
+// count from GetSystemMetrics(SM_CMONITORS) — reliably POLLABLE, so it needs no
+// message pump: on a physical power-off, a DisplayPort monitor drops out of the
+// desktop and the count falls (PLAN.md §0.1/§4.4a). Display *power* state
+// (GUID_SESSION_DISPLAY_STATUS) needs a message pump and is deferred until it can
+// be validated on real hardware; DisplayPower stays -1 (unknown) meanwhile, and
+// monitor_on falls back to the connection count.
+
+const smCMonitors = 80 // SM_CMONITORS
 
 var (
 	user32   = windows.NewLazySystemDLL("user32.dll")
@@ -22,6 +28,7 @@ var (
 	procGetWindowTextW           = user32.NewProc("GetWindowTextW")
 	procGetWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
 	procGetLastInputInfo         = user32.NewProc("GetLastInputInfo")
+	procGetSystemMetrics         = user32.NewProc("GetSystemMetrics")
 	procGetTickCount             = kernel32.NewProc("GetTickCount")
 )
 
@@ -39,13 +46,28 @@ func (s *winSampler) Sample() (Reading, error) {
 	idle := idleMS()
 	exe, title := foreground()
 	return Reading{
-		MonitorsActive: -1, // not sampled in Phase 0
-		DisplayPower:   -1, // not sampled in Phase 0
+		MonitorsActive: monitorCount(),
+		DisplayPower:   -1, // display power (DPMS) via message pump: deferred, see file header
 		IsIdle:         idle > IdleThresholdMS,
 		IdleMS:         idle,
 		ExeName:        exe,
 		WindowTitle:    title,
 	}, nil
+}
+
+// MonitorOn reports the composite monitor state for the transition poller.
+func (s *winSampler) MonitorOn() int {
+	if monitorCount() > 0 {
+		return 1
+	}
+	return 0
+}
+
+// monitorCount returns the number of display monitors on the desktop. It drops
+// when a monitor is disconnected (including a DisplayPort monitor powered off).
+func monitorCount() int {
+	n, _, _ := procGetSystemMetrics.Call(uintptr(smCMonitors))
+	return int(n)
 }
 
 // idleMS returns milliseconds since the last mouse/keyboard input.
