@@ -1,0 +1,34 @@
+# FabScreenTime
+
+A lean, self-hosted screentime tracker for **self-owned Windows PCs**. An invisible per-PC agent
+records active window (title + exe), idle state, and **monitor on/off** once a minute; a single
+Go backend on a Proxmox server stores it and serves a responsive dashboard that aggregates across
+every enrolled machine. New machines enroll from the website.
+
+> **Status: planning.** No code yet. The full development plan — architecture, tech stack, data
+> model, security model, and a phased roadmap — is in **[PLAN.md](./PLAN.md)**.
+
+## The one idea to know
+
+**Monitor-on time is the primary "screentime" metric**, not raw input activity. Autoclickers can
+forge mouse/keyboard input indistinguishably at the OS API, but (for the household's actual usage)
+they run with the monitor off — so monitor-on is the better proxy for a human actually present.
+This premise has an important caveat and a required validation step; see
+[PLAN.md §0.1](./PLAN.md).
+
+## Intended shape (see PLAN.md for the why)
+
+- **Agent + backend:** Go — one console-less Windows `.exe`, one static Linux binary, shared JSON
+  contract.
+- **Storage:** SQLite (WAL, pure-Go `modernc.org/sqlite`).
+- **Dashboard:** React + Vite + Tailwind + shadcn/ui, embedded in the backend binary.
+- **Host:** unprivileged Debian LXC on Proxmox, exposed via Cloudflare Tunnel; backups via
+  `vzdump` + a nightly `sqlite3 .backup`.
+- **Auto-update:** silent, with **signed manifests + pinned keys** so a compromised backend can't
+  push arbitrary code (this is a hard requirement — see PLAN.md §5).
+
+## Scope & consent
+
+Deploy only on machines you own or are authorized to monitor (household self-monitoring / parental
+oversight). Never keylogs — only window titles + activity flags. Not for corporate/EDR-managed
+devices. See [PLAN.md §9](./PLAN.md).
