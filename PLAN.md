@@ -341,6 +341,29 @@ Details:
   (VCP `0xD6`) — a physically-off monitor typically stops answering DDC, so a failed/`off` query
   becomes the signal. Flaky and per-monitor; a fallback, not the primary (see §0.1 ladder).
 
+### 4.4c Mixed fleet — decide the screen-off rule per device (this fleet is a DP/HDMI mix)
+
+Since the household mixes DisplayPort and HDMI, **no single rule is authoritative fleet-wide.**
+Two design consequences, both cheap because they're already half-built:
+
+1. **The agent always uploads all raw signals** (`monitors_active`, `display_power`, `is_idle`,
+   `idle_ms`) — never a pre-collapsed boolean. So the "screen off" definition is chosen *after*
+   the fact and can be changed per device without redeploying agents.
+2. **Each device carries a `monitor_detect_mode`** (`connection` | `ddc` | `power` | `heuristic`),
+   set by a one-time calibration when the machine is enrolled (run the §0.1 probe once per
+   distinct monitor/connector setup, not once per machine you own):
+   - **`connection`** (default) — DP machines and any HDMI monitor that *does* drop the link:
+     `monitor_on` = `monitors_active > 0 AND display_power != 0`.
+   - **`ddc`** — HDMI machines whose monitor answers DDC/CI: add the VCP `0xD6` power-mode probe.
+   - **`power`** — machines where only OS display-off is meaningful (rare here): use
+     `display_power` alone.
+   - **`heuristic`** — HDMI machine that exposes *nothing* on power-off: `monitor_on` falls back
+     to `active input`, and "known game foreground + perfectly regular input" is bucketed as
+     *likely macro* rather than trusted screentime (the honest floor).
+
+   The dashboard shows each device's detection mode and flags any device on `heuristic` as
+   "screentime is approximate" so the mixed-fleet caveat is visible, not hidden.
+
 ### 4.5 Exact minutes via transition events (not just 1/min snapshots)
 
 Counting `COUNT(*)` snapshots as "minutes" quantizes the headline metric to ±60s and
@@ -537,6 +560,7 @@ CREATE TABLE devices (
     agent_version  TEXT,
     clock_skew_s   INTEGER,                      -- last observed device clock offset
     os_info        TEXT,
+    monitor_detect_mode TEXT DEFAULT 'connection', -- connection | ddc | power | heuristic (§4.4c)
     log_titles     INTEGER NOT NULL DEFAULT 1,   -- per-device title opt-out (§9)
     revoked        INTEGER NOT NULL DEFAULT 0
 );
@@ -898,9 +922,10 @@ machine until Phase 1's update security exists.
   `GetLastInputInfo`; capture the four traces (normal use / walk-away timeout / **physically power
   the monitor off the way the household does** / real autoclicker running with the monitor off).
   **The decisive check:** does the active-monitor count drop to 0 when the monitor is powered off?
-  If yes → connection-presence is the primary signal, proceed. If no (HDMI keeps it connected) →
-  work the §0.1 fallback ladder (DDC/CI probe, changed off-method, or accept-and-bucket) **before**
-  building Phase 2 on it.
+  Run it on **at least one DisplayPort and one HDMI machine** (the fleet is a mix) and record the
+  resulting `monitor_detect_mode` per connector type: `connection` where the count drops, else
+  `ddc` if the monitor answers a VCP `0xD6` probe, else `heuristic` (§4.4c). Resolve every distinct
+  setup here **before** building Phase 2 on it.
 - Go monorepo: `cmd/fabscreentimed`, `cmd/agent`, `internal/shared` (JSON contract). `Sampler`
   interface + Linux stub (§4.1) so the agent builds/tests on CI.
 - Backend: `net/http.ServeMux` + `modernc.org/sqlite`, `devices` + `samples`, `POST /api/ingest`
