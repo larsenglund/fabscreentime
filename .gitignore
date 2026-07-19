@@ -9,8 +9,15 @@
 *.db-shm
 montest.csv
 /.fabscreentime/
+/agentdata/
+/run/
 queue.json
 device_id
+
+# Signing keys — NEVER commit the private update-signing key
+*.key
+release.key
+manifest.json
 
 # Editor / OS
 .DS_Store

@@ -5,8 +5,9 @@ records active window (title + exe), idle state, and **monitor on/off** once a m
 Go backend on a Proxmox server stores it and serves a responsive dashboard that aggregates across
 every enrolled machine. New machines enroll from the website.
 
-> **Status: planning.** No code yet. The full development plan — architecture, tech stack, data
-> model, security model, and a phased roadmap — is in **[PLAN.md](./PLAN.md)**.
+> The full development plan — architecture, tech stack, data model, security model, and a phased
+> roadmap — is in **[PLAN.md](./PLAN.md)**. Phases 0–2 are implemented and tested. For running and
+> testing locally on Windows (and continuing the work), see **[HANDOFF.md](./HANDOFF.md)**.
 
 ## The one idea to know
 

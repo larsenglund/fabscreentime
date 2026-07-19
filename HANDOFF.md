@@ -1,0 +1,273 @@
+# FabScreenTime — Session Handoff & Local (Windows) Setup Guide
+
+This file carries the full context of the cloud session over to a local checkout so you can
+**run and test the app on real Windows hardware** (which the cloud box couldn't do). Keep it in
+the repo; it's committed on branch `claude/screentime-app-plan-nttogj`.
+
+> **If you are Claude continuing this project on Claude Desktop:** read [`PLAN.md`](./PLAN.md)
+> (the full development plan — especially **§0**, the key decisions) and this file, then continue
+> from **Phase 3** in the roadmap ([PLAN.md §10](./PLAN.md)). The code for Phases 0–2 is built and
+> tested; your first high-value job on real hardware is the `montest` validation in section 5 below.
+
+---
+
+## 1. Where things stand
+
+- **Branch:** `claude/screentime-app-plan-nttogj` (NOT merged to a default branch). All work is here.
+- **Last commit:** `c670971` — "Implement Phase 2".
+- **Done & tested (Linux + Windows cross-compile; CI runs the real Win32 code on `windows-latest`):**
+  - **Phase 0** — walking skeleton: agent sampling, bounded offline queue, batched idempotent
+    ingest with timestamp clamping, per-device summary, no-build placeholder dashboard.
+  - **Phase 1** — signed auto-update firebreak: Ed25519-signed manifests, dual pinned keys,
+    monotonic anti-rollback, same-origin download enforcement, fail-closed verify-before-swap,
+    offline signing CLI (`fst-sign`). Fully tested including all rejection paths.
+  - **Phase 2** — monitor signal (poll-based connected-monitor count — the physical-power-off
+    signal), transition `monitor_events`, exact-interval monitor-on minutes, dirty-days rollup
+    engine, hidden Scheduled-Task autostart (`agent -install`/`-uninstall`).
+- **Not started:** Phases 3–8 (auth/enrollment/tokens → dashboard → install-from-website →
+  Proxmox deploy → availability/observability → polish). See [PLAN.md §10](./PLAN.md).
+
+### Two things that need YOU / real hardware (can't be done in the cloud)
+
+1. **`montest` validation** (section 5) — the one gating experiment: does physically powering a
+   monitor off drop the connected-monitor count? Decides the primary metric per machine. **Do this
+   first.**
+2. **Pin your own signing key** (section 6) — `fst-sign genkey`, paste the public key, so
+   auto-update actually works. The private key must stay offline.
+
+### One deliberate deferral
+
+The **display-power (DPMS) message-pump watcher** (`GUID_SESSION_DISPLAY_STATUS`) is not
+implemented — it's the one piece that needs a Windows box to write safely. Until then
+`display_power` is "unknown" and `monitor_on` falls back to the connected-monitor **count**, which
+is exactly the signal that detects a physical power-off. Adding the pump is a good early local task
+(see section 9).
+
+---
+
+## 2. Prerequisites (Windows)
+
+- **Git** — https://git-scm.com/download/win (includes Git Bash, handy for the `scripts/*.sh`).
+- **Go** — install the latest from https://go.dev/dl/ (the module pins `go 1.25.0`; recent Go
+  toolchains fetch the matching version automatically). Verify: `go version`.
+- **VS Code** (optional) with the Go extension.
+- No C compiler needed — every dependency is pure Go (`modernc.org/sqlite`, `golang.org/x/sys`).
+
+---
+
+## 3. Get the code locally
+
+In PowerShell:
+
+```powershell
+cd $HOME\dev        # or wherever you keep projects
+git clone https://github.com/larsenglund/fabscreentime.git
+cd fabscreentime
+git checkout claude/screentime-app-plan-nttogj
+go build ./...      # first build downloads modules; should exit 0
+go test ./...       # all tests should pass
+```
+
+If `go test ./...` is green, your toolchain is good.
+
+---
+
+## 4. Repo layout
+
+```
+PLAN.md                     the full development plan (read §0 first)
+HANDOFF.md                  this file
+cmd/fabscreentimed/         backend: API + dashboard + SQLite, one binary
+cmd/agent/                  Windows agent (stub sampler off-Windows; -once/-install/-uninstall)
+cmd/montest/                Phase 0 monitor-signal probe (Windows-only)
+cmd/fst-sign/               offline signing CLI: genkey / sign / verify
+internal/shared/            JSON contract shared by agent & backend
+internal/agent/             agent core, Sampler interface, queue, self-update, autostart
+internal/server/            HTTP handlers, SQLite store, rollups, placeholder dashboard
+internal/update/            Ed25519 manifest sign/verify (the auto-update firebreak)
+scripts/build.sh            builds backend + silent agent.exe + montest.exe + fst-sign (Git Bash)
+.github/workflows/ci.yml    CI: Linux build/test + windows-latest smoke run
+```
+
+---
+
+## 5. ⭐ FIRST TASK — validate the monitor signal (`montest`)
+
+This is the one experiment the whole metric design hinges on (PLAN.md §0.1). Your fleet is a
+DisplayPort/HDMI mix, so run it on **one DP machine and one HDMI machine**.
+
+```powershell
+# Build the probe (console app; prints to the window and to montest.csv)
+go build -o montest.exe .\cmd\montest
+.\montest.exe
+```
+
+Now, with it running: **physically power the monitor off the way the household normally does, wait
+~30 seconds, then power it back on.** Press `Ctrl+C` to stop. Open `montest.csv`.
+
+**What to look for** in the `monitors_active` column while the monitor was off:
+
+- **Drops to 0** (single-monitor) or decreases → connection-presence is a clean, un-fakeable
+  screen-off signal on that machine. Set its `monitor_detect_mode = connection` (the default). This
+  is the expected DisplayPort result. ✅
+- **Stays the same** → that machine (typically HDMI) doesn't expose the power-off via the count.
+  It needs the fallback ladder (PLAN.md §4.4c): try DDC/CI, or accept the approximate/heuristic
+  mode. Note which machines these are.
+
+Record the result for each connector type — it drives how Phase 2's monitor logic is finalized and
+whether the DPMS pump (section 9) is worth adding.
+
+(Multi-monitor shortcut: if powering one screen off makes windows/icons jump to another display,
+Windows saw the disconnect — same "connection" conclusion, no CSV needed.)
+
+---
+
+## 6. Run the whole thing locally (backend + agent on the same PC)
+
+**Terminal 1 — backend** (runs fine on Windows; production is Linux/Proxmox):
+
+```powershell
+go run .\cmd\fabscreentimed -addr :8080 -db .\dev.db -rollup 30s
+# open http://localhost:8080 for the placeholder dashboard
+```
+
+**Terminal 2 — agent** (console build so you can watch its logs; the *silent* build is section 8):
+
+```powershell
+go run .\cmd\agent -server http://localhost:8080 -interval 5s -datadir .\agentdata
+```
+
+Within a few seconds the dashboard at http://localhost:8080 should show your PC with rising
+screentime, and `http://localhost:8080/api/dashboard/summary?range=7d` returns JSON. This is the
+real Win32 sampler now (real foreground window + exe, real idle, real monitor count) — verify the
+active-window/exe and idle columns look right as you use the machine.
+
+---
+
+## 7. Exercise the signed auto-update (Phase 1) locally
+
+This proves the security firebreak on a real machine.
+
+```powershell
+# 1) Generate an offline signing key (keep release.key OUT of git; .gitignore covers *.key? add it)
+go run .\cmd\fst-sign genkey -out release.key
+#    → prints a public key. Copy it.
+
+# 2) Pin it: edit internal/agent/pinnedkeys.go, uncomment a line in pinnedUpdateKeysHex and paste:
+#       var pinnedUpdateKeysHex = []string{ "PASTE_PUBLIC_KEY_HEX" }
+
+# 3) Build agent v1 (build number 1) and a "v2" (build number 2)
+mkdir dist -Force
+go build -ldflags "-X main.Version=2.0.0 -X main.Build=2" -o dist\agent.exe .\cmd\agent
+
+# 4) Sign v2 and stage it for the backend
+go run .\cmd\fst-sign sign -key release.key -in dist\agent.exe -version 2.0.0 -build 2 -out dist\manifest.json
+go run .\cmd\fst-sign verify -pub PASTE_PUBLIC_KEY_HEX -manifest dist\manifest.json -bin dist\agent.exe
+
+# 5) Run the backend pointed at dist\ as the agent release dir
+go run .\cmd\fabscreentimed -addr :8080 -db .\dev.db -agentdir dist
+
+# 6) In another terminal, run a build-1 agent; it should verify+download+swap to 2.0.0 and relaunch
+go build -ldflags "-X main.Version=1.0.0 -X main.Build=1" -o run\agent.exe .\cmd\agent
+.\run\agent.exe -server http://localhost:8080 -interval 5s -datadir .\agentdata
+#    watch the log: "update ... verified; ... update applied; relaunching as 2.0.0"
+```
+
+To confirm the firebreak rejects bad updates, re-sign with a *lower* build, tamper `manifest.json`,
+or point `url` off-origin — the agent logs a rejection and keeps running v1. (These paths are also
+covered by `go test ./internal/agent -run SelfUpdate`.)
+
+> ⚠️ Add `release.key` and `dist/` to `.gitignore` before committing, and **never commit the
+> private key**. The public key in `pinnedkeys.go` is fine to commit.
+
+---
+
+## 8. Test silent operation + autostart (Phase 2)
+
+**Silent build** (GUI subsystem — no console window at all):
+
+```powershell
+go build -ldflags "-s -w -H=windowsgui -X main.Version=0.1.0 -X main.Build=1" -o dist\agent.exe .\cmd\agent
+```
+
+**Install hidden autostart** (copies to `%LOCALAPPDATA%\FabScreenTime\agent.exe`, registers a
+hidden "at logon" Scheduled Task, and starts it):
+
+```powershell
+dist\agent.exe -install -server http://localhost:8080
+```
+
+Verify it's running and hidden:
+- `Get-ScheduledTask -TaskName FabScreenTimeAgent` shows the task.
+- Task Scheduler → the task has **Hidden** checked, runs at logon, LIMITED, restart-on-failure.
+- Task Manager → Details → `agent.exe` is present; **no** window, **no** tray icon.
+- The dashboard shows the device reporting.
+
+**Uninstall:**
+
+```powershell
+dist\agent.exe -uninstall
+# then remove leftover files if you want a clean machine:
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\FabScreenTime"
+```
+
+### Antivirus / SmartScreen reality (expected)
+
+A hidden, self-persisting, self-updating exe **looks like spyware to Defender/SmartScreen** — that's
+inherent, not a bug (PLAN.md §9). On your own test machine you can allow it. For real deployment the
+plan covers code-signing / Trusted-Publisher and a scoped exclusion. **Do not** disable Defender
+globally, and don't install this on any work/school/EDR-managed machine.
+
+---
+
+## 9. Good early local tasks (now that you can run Windows)
+
+1. **Add the DPMS message-pump watcher** (the deferred piece, PLAN.md §4.4b). A message-only window
+   + `RegisterPowerSettingNotification(GUID_SESSION_DISPLAY_STATUS)` in a `runtime.LockOSThread`
+   goroutine, feeding `display_power` into the sampler and emitting transitions. Now testable: put
+   the display to sleep / hit the OS "turn off display" and confirm `display_power` flips. Wire it
+   so a pump failure degrades gracefully to the current poll-based path.
+2. **Finalize per-device `monitor_detect_mode`** from your `montest` results.
+3. **Proceed to Phase 3** — auth, enrollment & per-device tokens (fully testable, no Windows
+   specifics): one-time enrollment tokens, hashed per-device bearer tokens, revocation, DPAPI token
+   storage on the client, replacing the Phase 0 "trust the device UUID" identity.
+
+---
+
+## 10. Gotchas & notes
+
+- **`go 1.25.0`** is pinned in `go.mod`; install a recent Go and let it fetch the toolchain.
+- **SQLite** uses `SetMaxOpenConns(1)` (single writer) — simple and plenty at this scale; don't
+  "optimize" it into lock errors.
+- **Day boundaries are UTC** for now (rollups). A configurable household timezone is a later
+  refinement (PLAN.md §6.2) — fine for testing, note it when you look at daily numbers near midnight.
+- **Dashboard is a placeholder** (server-rendered HTML in `internal/server/index.go`); the real
+  React/Tailwind/shadcn UI is Phase 4.
+- **Backend on Windows vs Linux:** identical code; run it locally on Windows for dev, deploy to the
+  Proxmox LXC for real (PLAN.md §8). SQLite/`.db` files are cross-platform.
+- **CI** already builds/tests on Linux and runs the real Win32 code on `windows-latest`; keep it
+  green (`gofmt`, `go vet`, `go test`).
+
+---
+
+## 11. Git workflow (unchanged)
+
+- Keep developing on **`claude/screentime-app-plan-nttogj`**.
+- `go test ./... ; gofmt -l .` before committing (CI enforces both).
+- Commit with clear messages; push with `git push -u origin claude/screentime-app-plan-nttogj`.
+- No PR yet — the branch isn't merged. Open one only when you decide to.
+
+---
+
+## 12. Quick command reference
+
+```powershell
+go build ./...                              # build everything
+go test ./...                               # run all tests
+gofmt -w .                                  # format
+go run .\cmd\fabscreentimed -db .\dev.db    # backend on :8080
+go run .\cmd\agent -server http://localhost:8080 -interval 5s -datadir .\agentdata
+go build -o montest.exe .\cmd\montest ; .\montest.exe   # monitor probe
+go run .\cmd\fst-sign genkey -out release.key           # signing key
+# Git Bash: ./scripts/build.sh 1.0.0        # builds silent agent.exe + montest.exe + fst-sign
+```
