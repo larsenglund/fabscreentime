@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS samples (
     monitor_on      INTEGER NOT NULL,
     monitors_active INTEGER,
     display_power   INTEGER,
+    ddc_power       INTEGER,
     is_idle         INTEGER NOT NULL,
     idle_ms         INTEGER,
     exe_name        TEXT,
@@ -100,6 +101,13 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// Additive migration for databases created before the column existed; on an
+	// up-to-date schema the duplicate-column error is expected and ignored.
+	if _, err := db.Exec(`ALTER TABLE samples ADD COLUMN ddc_power INTEGER`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -137,8 +145,8 @@ func (s *Store) InsertSamples(deviceID int64, samples []shared.Sample, serverNow
 
 	stmt, err := tx.Prepare(`
 		INSERT OR IGNORE INTO samples
-			(device_id, ts, monitor_on, monitors_active, display_power, is_idle, idle_ms, exe_name, window_title)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			(device_id, ts, monitor_on, monitors_active, display_power, ddc_power, is_idle, idle_ms, exe_name, window_title)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return 0, days, err
 	}
@@ -152,6 +160,7 @@ func (s *Store) InsertSamples(deviceID int64, samples []shared.Sample, serverNow
 		res, err := stmt.Exec(
 			deviceID, smp.ClientTS, smp.MonitorOn,
 			nullableInt(smp.MonitorsActive), nullableInt(smp.DisplayPower),
+			nullableDDC(smp.DDCPower),
 			boolToInt(smp.IsIdle), smp.IdleMS, smp.Exe, truncate(smp.Title, maxTitleLen),
 		)
 		if err != nil {
@@ -384,6 +393,16 @@ func (s *Store) Summary(since, until int64) ([]DeviceSummary, error) {
 
 func nullableInt(v int) any {
 	if v < 0 {
+		return nil
+	}
+	return v
+}
+
+// nullableDDC stores the raw DDC probe value. Unlike the other monitor signals
+// its meaningful values include negatives (-1 no handle, -2 query failed);
+// only "not sampled" (-3, or 0 from agents predating the field) becomes NULL.
+func nullableDDC(v int) any {
+	if v == 0 || v == -3 {
 		return nil
 	}
 	return v

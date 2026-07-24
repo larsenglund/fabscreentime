@@ -111,11 +111,31 @@ func (a *Agent) monitorPollLoop(ctx context.Context, p MonitorProber) {
 	}
 }
 
-// deriveMonitorOn collapses the two raw monitor signals into a 0/1 the way the
-// dashboard's headline metric reads them. When monitor state is unknown (the
-// Phase 0 agent doesn't sample it) we optimistically report "on" so sessions
-// still count; the raw -1s are preserved for later recomputation.
+// ddcSaysOff interprets the raw DDC probe value per the rule validated in
+// MONTEST-RESULTS.md: a VCP standby/off reply (2..5, the HDMI signature) is
+// direct testimony; a missing physical-monitor handle (-1, the DP signature)
+// is trusted only once armed — i.e. once DDC has provably worked this session
+// — so hardware where DDC never works (VMs, RDP) fails toward "on", which is
+// visible over-counting rather than silently zeroed screentime.
+func ddcSaysOff(power int, armed bool) bool {
+	switch {
+	case power >= 2 && power <= 5:
+		return true
+	case power == DDCNoHandle:
+		return armed
+	default: // 1 = on; -2/-3/0 = no testimony
+		return false
+	}
+}
+
+// deriveMonitorOn collapses the raw monitor signals into a 0/1 the way the
+// dashboard's headline metric reads them. Any signal testifying "off" wins;
+// when everything is unknown we optimistically report "on" so sessions still
+// count. The raw values are preserved for later recomputation server-side.
 func deriveMonitorOn(r Reading) int {
+	if ddcSaysOff(r.DDCPower, r.DDCArmed) {
+		return 0
+	}
 	if r.MonitorsActive < 0 && r.DisplayPower < 0 {
 		return 1
 	}
@@ -134,6 +154,7 @@ func (a *Agent) Tick(ctx context.Context) {
 			ClientTS:       a.cfg.Now().Unix(),
 			MonitorsActive: r.MonitorsActive,
 			DisplayPower:   r.DisplayPower,
+			DDCPower:       r.DDCPower,
 			MonitorOn:      deriveMonitorOn(r),
 			IsIdle:         r.IsIdle,
 			IdleMS:         r.IdleMS,

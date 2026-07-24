@@ -7,7 +7,7 @@
 *.db
 *.db-wal
 *.db-shm
-montest.csv
+montest*.csv
 /.fabscreentime/
 /agentdata/
 /run/

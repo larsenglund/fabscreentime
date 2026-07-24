@@ -185,10 +185,39 @@ func TestDeriveMonitorOn(t *testing.T) {
 		{"connected-and-powered", Reading{MonitorsActive: 2, DisplayPower: 1}, 1},
 		{"disconnected", Reading{MonitorsActive: 0, DisplayPower: 1}, 0},
 		{"powered-off", Reading{MonitorsActive: 1, DisplayPower: 0}, 0},
+
+		// The MONTEST-RESULTS.md scenarios: topology frozen at 1 in all of them.
+		{"ddc-vcp-on", Reading{MonitorsActive: 1, DisplayPower: -1, DDCPower: 1, DDCArmed: true}, 1},
+		{"hdmi-off-vcp-standby", Reading{MonitorsActive: 1, DisplayPower: -1, DDCPower: 5, DDCArmed: true}, 0},
+		{"dp-off-handle-lost-armed", Reading{MonitorsActive: 1, DisplayPower: -1, DDCPower: DDCNoHandle, DDCArmed: true}, 0},
+		{"chronic-queryfail-is-on", Reading{MonitorsActive: 1, DisplayPower: -1, DDCPower: DDCQueryFailed, DDCArmed: true}, 1},
+		{"no-handle-unarmed-stays-on", Reading{MonitorsActive: 1, DisplayPower: -1, DDCPower: DDCNoHandle}, 1},
+		{"ddc-not-sampled", Reading{MonitorsActive: 1, DisplayPower: -1, DDCPower: DDCNotSampled}, 1},
+		{"ddc-off-beats-unknown-counts", Reading{MonitorsActive: -1, DisplayPower: -1, DDCPower: 4, DDCArmed: true}, 0},
 	}
 	for _, c := range cases {
 		if got := deriveMonitorOn(c.r); got != c.want {
 			t.Errorf("%s: deriveMonitorOn=%d want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestDDCSaysOff(t *testing.T) {
+	cases := []struct {
+		power int
+		armed bool
+		want  bool
+	}{
+		{1, false, false}, {1, true, false}, // VCP on
+		{2, false, true}, {3, true, true}, {4, false, true}, {5, true, true}, // VCP standby/off: direct testimony, arming irrelevant
+		{DDCNoHandle, true, true},                                     // DP off signature, DDC proven working
+		{DDCNoHandle, false, false},                                   // chronic -1 (VM/RDP/never-working DDC): not trusted
+		{DDCQueryFailed, true, false}, {DDCQueryFailed, false, false}, // Philips chronic ON state
+		{DDCNotSampled, false, false}, {0, false, false}, // no probe, no testimony
+	}
+	for _, c := range cases {
+		if got := ddcSaysOff(c.power, c.armed); got != c.want {
+			t.Errorf("ddcSaysOff(%d, %v) = %v, want %v", c.power, c.armed, got, c.want)
 		}
 	}
 }

@@ -98,7 +98,10 @@ scripts/build.sh            builds backend + silent agent.exe + montest.exe + fs
 > topology/connection signals never fire on physical power-off there. The working signal is
 > the probe's dxva2 `ddc_power` column — over DP the physical-monitor handle disappears,
 > over HDMI the VCP `0xD6` reply flips to "off"; the combined ON/OFF rule is in the results
-> file. Still pending: one round on a second PC with a different GPU.
+> file. **The rule is implemented in the agent** (`ddc_windows.go` watcher → raw `ddc_power`
+> per sample → `ddcSaysOff` derivation) and verified end-to-end against the backend: a
+> physical power-off flips `monitor_on`, emits the `monitor_events` pair, and lands in the
+> daily rollup. Still pending: one probe round on a second PC with a different GPU.
 
 This is the one experiment the whole metric design hinges on (PLAN.md §0.1). Your fleet is a
 DisplayPort/HDMI mix, so run it on **one DP machine and one HDMI machine**.

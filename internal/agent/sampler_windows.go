@@ -10,13 +10,14 @@ import (
 )
 
 // Real Win32 sampler: foreground window (title + owning exe), input idle, and
-// monitor connection count. The primary monitor signal is the connected-display
-// count from GetSystemMetrics(SM_CMONITORS) — reliably POLLABLE, so it needs no
-// message pump: on a physical power-off, a DisplayPort monitor drops out of the
-// desktop and the count falls (PLAN.md §0.1/§4.4a). Display *power* state
-// (GUID_SESSION_DISPLAY_STATUS) needs a message pump and is deferred until it can
-// be validated on real hardware; DisplayPower stays -1 (unknown) meanwhile, and
-// monitor_on falls back to the connection count.
+// the monitor signals. Hardware validation (MONTEST-RESULTS.md) showed that on
+// this fleet a physically powered-off monitor NEVER drops out of the display
+// topology — the connected-display count (SM_CMONITORS) stays put on both DP
+// and HDMI — so the count is kept as a raw signal but the load-bearing off
+// detector is the DDC/CI watcher (ddc_windows.go): DP power-off removes the
+// physical-monitor handle; HDMI power-off answers VCP 0xD6 with standby/off.
+// Display *power* state (GUID_SESSION_DISPLAY_STATUS) needs a message pump and
+// is still deferred; DisplayPower stays -1 (unknown) meanwhile.
 
 const smCMonitors = 80 // SM_CMONITORS
 
@@ -37,17 +38,22 @@ type lastInputInfo struct {
 	dwTime uint32
 }
 
-type winSampler struct{}
+type winSampler struct {
+	ddc *ddcWatcher
+}
 
 // NewSampler returns the real Win32 sampler on Windows.
-func NewSampler() Sampler { return &winSampler{} }
+func NewSampler() Sampler { return &winSampler{ddc: newDDCWatcher()} }
 
 func (s *winSampler) Sample() (Reading, error) {
 	idle := idleMS()
 	exe, title := foreground()
+	ddcPower, ddcArmed := s.ddc.read()
 	return Reading{
 		MonitorsActive: monitorCount(),
 		DisplayPower:   -1, // display power (DPMS) via message pump: deferred, see file header
+		DDCPower:       ddcPower,
+		DDCArmed:       ddcArmed,
 		IsIdle:         idle > IdleThresholdMS,
 		IdleMS:         idle,
 		ExeName:        exe,
@@ -55,9 +61,11 @@ func (s *winSampler) Sample() (Reading, error) {
 	}, nil
 }
 
-// MonitorOn reports the composite monitor state for the transition poller.
+// MonitorOn reports the composite monitor state for the transition poller,
+// applying the same rule as deriveMonitorOn: any off testimony wins.
 func (s *winSampler) MonitorOn() int {
-	if monitorCount() > 0 {
+	ddcPower, ddcArmed := s.ddc.read()
+	if monitorCount() > 0 && !ddcSaysOff(ddcPower, ddcArmed) {
 		return 1
 	}
 	return 0

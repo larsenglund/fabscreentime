@@ -9,14 +9,19 @@ package shared
 // so the "screen off" rule can be chosen/changed server-side per device without
 // redeploying agents (PLAN.md §4.4c). A value of -1 means "not sampled".
 type Sample struct {
-	ClientTS       int64  `json:"client_ts"`       // unix seconds, agent wall clock (server clamps it)
-	MonitorsActive int    `json:"monitors_active"` // raw active-display count (§4.4a); -1 = unknown
-	DisplayPower   int    `json:"display_power"`   // raw GUID_SESSION_DISPLAY_STATUS 0/1/2 (§4.4b); -1 = unknown
-	MonitorOn      int    `json:"monitor_on"`      // agent's derived 0/1 for convenience; server may recompute
-	IsIdle         bool   `json:"is_idle"`
-	IdleMS         int64  `json:"idle_ms"`
-	Exe            string `json:"exe"`
-	Title          string `json:"title"`
+	ClientTS       int64 `json:"client_ts"`       // unix seconds, agent wall clock (server clamps it)
+	MonitorsActive int   `json:"monitors_active"` // raw active-display count (§4.4a); -1 = unknown
+	DisplayPower   int   `json:"display_power"`   // raw GUID_SESSION_DISPLAY_STATUS 0/1/2 (§4.4b); -1 = unknown
+	// DDCPower is the raw DDC/CI probe result, the validated physical-power-off
+	// signal (MONTEST-RESULTS.md): 1 = VCP says on, 2..5 = VCP says standby/off,
+	// -1 = no physical-monitor handle, -2 = handle present but query failed,
+	// -3 or 0 (absent) = not sampled.
+	DDCPower  int    `json:"ddc_power"`
+	MonitorOn int    `json:"monitor_on"` // agent's derived 0/1 for convenience; server may recompute
+	IsIdle    bool   `json:"is_idle"`
+	IdleMS    int64  `json:"idle_ms"`
+	Exe       string `json:"exe"`
+	Title     string `json:"title"`
 }
 
 // MonitorEvent records the exact instant the monitor's on/off state changed

@@ -48,11 +48,17 @@ above (handle presence **and** VCP power value together, never either alone). If
 display-sleep trips the same signals, that conflation is acceptable: both states mean
 the screen is dark ⇒ not screentime.
 
-**Agent follow-up (Phase 2 refinement):** upload the raw `ddc_power` value itself as a
-per-sample column (the §4.4c upload-raw-signals principle) next to
-`monitors_active`/`display_power`, sampled on its own goroutine at ~2 s with a cached
-read (DDC transactions are slow and must never stall the sampler; see the probe's
-`ddcLoop` for the pattern). Derive `monitor_on` server-side per device mode.
+**Agent implementation (landed + verified end-to-end 2026-07-24):** the agent now runs
+the same probe as a background watcher ([`internal/agent/ddc_windows.go`](./internal/agent/ddc_windows.go),
+~2 s cadence, cached read, synchronous first fill, inert if dxva2 is missing), uploads
+raw `ddc_power` per sample (`samples.ddc_power`, additive migration), and derives
+`monitor_on` with the rule above (`ddcSaysOff` in [`internal/agent/core.go`](./internal/agent/core.go)).
+The `-1 ⇒ off` clause is gated on an **arming** guard — a VCP power reply must have been
+seen this session — so hardware where DDC never works (VMs, RDP) fails toward visible
+over-counting, never silently zeroed screentime. Live verification against the real
+backend (Dell via HDMI): the first sample after the button press flipped to
+`monitor_on=0, ddc_power=5`; the 10 s transition poller emitted the exact
+`monitor_events` off/on pair; the rollup integrated it into `daily_stats.monitor_minutes`.
 
 ## Machine 2 — a second PC (different GPU) · PENDING
 

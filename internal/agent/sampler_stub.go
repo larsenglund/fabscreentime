@@ -30,6 +30,7 @@ func (s *stubSampler) Sample() (Reading, error) {
 	return Reading{
 		MonitorsActive: -1,
 		DisplayPower:   -1,
+		DDCPower:       DDCNotSampled,
 		IsIdle:         idle,
 		IdleMS:         idleMS,
 		ExeName:        app.exe,

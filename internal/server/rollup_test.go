@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -156,5 +157,55 @@ func TestServerRunRollupsClearsDirty(t *testing.T) {
 	_ = st.db.QueryRow(`SELECT monitor_minutes FROM daily_stats WHERE device_id=?`, id).Scan(&mon)
 	if mon != 1 {
 		t.Fatalf("rollup not applied: monitor_minutes=%d", mon)
+	}
+}
+
+// The DDC probe's meaningful values include negatives (-1 no handle, -2 query
+// failed), so they must round-trip raw — only "not sampled" becomes NULL.
+func TestInsertSamplesStoresRawDDCPower(t *testing.T) {
+	st := openTestStore(t)
+	id, err := st.UpsertDevice("dev-ddc", "host", "1", dayBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = st.InsertSamples(id, []shared.Sample{
+		{ClientTS: dayBase + 60, DDCPower: -1},  // DP off signature
+		{ClientTS: dayBase + 120, DDCPower: 5},  // HDMI off signature
+		{ClientTS: dayBase + 180, DDCPower: -3}, // not sampled → NULL
+		{ClientTS: dayBase + 240},               // legacy agent (field absent) → NULL
+	}, dayBase+300)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := st.db.Query(`SELECT ddc_power FROM samples WHERE device_id=? ORDER BY ts`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []sql.NullInt64
+	for rows.Next() {
+		var v sql.NullInt64
+		if err := rows.Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []sql.NullInt64{
+		{Int64: -1, Valid: true},
+		{Int64: 5, Valid: true},
+		{Valid: false},
+		{Valid: false},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d rows, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d: ddc_power = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }
