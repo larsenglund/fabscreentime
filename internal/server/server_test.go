@@ -24,21 +24,44 @@ func newTestServer(t *testing.T, now time.Time) (*Server, *Store) {
 	return srv, st
 }
 
+// enrollDevice runs the real prepare→enroll handshake over the handler and
+// returns the device UUID and its durable API token.
+func enrollDevice(t *testing.T, h http.Handler, name string) (uuid, token string) {
+	t.Helper()
+	var prep shared.PrepareEnrollResponse
+	rec := doJSON(t, h, http.MethodPost, "/api/enroll/prepare", "", shared.PrepareEnrollRequest{Name: name})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prepare status = %d, body=%s", rec.Code, rec.Body)
+	}
+	mustJSON(t, rec.Body.Bytes(), &prep)
+
+	var enr shared.EnrollResponse
+	rec = doJSON(t, h, http.MethodPost, "/api/enroll", "", shared.EnrollRequest{EnrollSecret: prep.EnrollSecret, Hostname: "host"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enroll status = %d, body=%s", rec.Code, rec.Body)
+	}
+	mustJSON(t, rec.Body.Bytes(), &enr)
+	if enr.DeviceUUID != prep.DeviceUUID {
+		t.Fatalf("enroll uuid %s != prepared %s", enr.DeviceUUID, prep.DeviceUUID)
+	}
+	return enr.DeviceUUID, enr.APIToken
+}
+
 func TestIngestThenSummary(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	srv, _ := newTestServer(t, now)
 	h := srv.Handler()
+	_, token := enrollDevice(t, h, "Living room PC")
 
 	req := shared.IngestRequest{
 		AgentVersion: "0.0.1",
-		DeviceUUID:   "dev-abc",
 		Hostname:     "living-room",
 		Samples: []shared.Sample{
 			{ClientTS: now.Unix() - 120, MonitorOn: 1, IsIdle: false, Exe: "game.exe", Title: "Game"},
 			{ClientTS: now.Unix() - 60, MonitorOn: 1, IsIdle: true, Exe: "chrome.exe", Title: "Web"},
 		},
 	}
-	rec := doIngest(t, h, req)
+	rec := doIngest(t, h, token, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("ingest status = %d, body=%s", rec.Code, rec.Body)
 	}
@@ -52,7 +75,7 @@ func TestIngestThenSummary(t *testing.T) {
 	}
 
 	// Re-send the same batch: idempotent, so zero new rows accepted.
-	rec2 := doIngest(t, h, req)
+	rec2 := doIngest(t, h, token, req)
 	var ing2 shared.IngestResponse
 	mustJSON(t, rec2.Body.Bytes(), &ing2)
 	if ing2.Accepted != 0 {
@@ -84,16 +107,16 @@ func TestIngestRejectsOutOfWindowTimestamps(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	srv, _ := newTestServer(t, now)
 	h := srv.Handler()
+	_, token := enrollDevice(t, h, "dev-x")
 
 	req := shared.IngestRequest{
-		DeviceUUID: "dev-x",
 		Samples: []shared.Sample{
 			{ClientTS: now.Unix(), MonitorOn: 1, Exe: "ok.exe"},           // in window
 			{ClientTS: now.Unix() - 10*24*3600, MonitorOn: 1, Exe: "old"}, // too old → rejected
 			{ClientTS: now.Unix() + 3600, MonitorOn: 1, Exe: "future"},    // too far ahead → rejected
 		},
 	}
-	rec := doIngest(t, h, req)
+	rec := doIngest(t, h, token, req)
 	var ing shared.IngestResponse
 	mustJSON(t, rec.Body.Bytes(), &ing)
 	if ing.Accepted != 1 {
@@ -101,11 +124,85 @@ func TestIngestRejectsOutOfWindowTimestamps(t *testing.T) {
 	}
 }
 
-func TestIngestRequiresDeviceUUID(t *testing.T) {
+func TestIngestRequiresToken(t *testing.T) {
 	srv, _ := newTestServer(t, time.Unix(1_700_000_000, 0))
-	rec := doIngest(t, srv.Handler(), shared.IngestRequest{DeviceUUID: ""})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
+	h := srv.Handler()
+
+	// No token → 401.
+	if rec := doIngest(t, h, "", shared.IngestRequest{}); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no-token status = %d, want 401", rec.Code)
+	}
+	// Garbage token → 401.
+	if rec := doIngest(t, h, "not-a-real-token", shared.IngestRequest{}); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad-token status = %d, want 401", rec.Code)
+	}
+}
+
+func TestEnrollmentIsSingleUse(t *testing.T) {
+	srv, _ := newTestServer(t, time.Unix(1_700_000_000, 0))
+	h := srv.Handler()
+
+	var prep shared.PrepareEnrollResponse
+	rec := doJSON(t, h, http.MethodPost, "/api/enroll/prepare", "", shared.PrepareEnrollRequest{Name: "PC"})
+	mustJSON(t, rec.Body.Bytes(), &prep)
+
+	// First use succeeds.
+	rec = doJSON(t, h, http.MethodPost, "/api/enroll", "", shared.EnrollRequest{EnrollSecret: prep.EnrollSecret})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first enroll = %d, want 200", rec.Code)
+	}
+	// Reuse of the consumed secret is rejected.
+	rec = doJSON(t, h, http.MethodPost, "/api/enroll", "", shared.EnrollRequest{EnrollSecret: prep.EnrollSecret})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("reused enroll = %d, want 401", rec.Code)
+	}
+}
+
+func TestRevokedDeviceIsRejected(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	srv, _ := newTestServer(t, now)
+	h := srv.Handler()
+	uuid, token := enrollDevice(t, h, "PC")
+
+	// Works before revocation.
+	if rec := doIngest(t, h, token, sample1(now)); rec.Code != http.StatusOK {
+		t.Fatalf("pre-revoke ingest = %d, want 200", rec.Code)
+	}
+	// Revoke via the dashboard endpoint.
+	revoked := true
+	rec := doJSON(t, h, http.MethodPatch, "/api/devices/"+uuid, "", shared.PatchDeviceRequest{Revoked: &revoked})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke = %d, want 200", rec.Code)
+	}
+	// Its token now fails auth.
+	if rec := doIngest(t, h, token, sample1(now)); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("post-revoke ingest = %d, want 401", rec.Code)
+	}
+}
+
+func TestEnrollPollReportsStatus(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	srv, _ := newTestServer(t, now)
+	h := srv.Handler()
+
+	var prep shared.PrepareEnrollResponse
+	rec := doJSON(t, h, http.MethodPost, "/api/enroll/prepare", "", shared.PrepareEnrollRequest{Name: "PC"})
+	mustJSON(t, rec.Body.Bytes(), &prep)
+
+	// Before check-in: pending.
+	rec = doJSON(t, h, http.MethodGet, "/api/devices/"+prep.DeviceUUID, "", nil)
+	var d shared.DeviceStatus
+	mustJSON(t, rec.Body.Bytes(), &d)
+	if d.Status != "pending" {
+		t.Fatalf("status = %q, want pending", d.Status)
+	}
+
+	// After enroll: active.
+	doJSON(t, h, http.MethodPost, "/api/enroll", "", shared.EnrollRequest{EnrollSecret: prep.EnrollSecret})
+	rec = doJSON(t, h, http.MethodGet, "/api/devices/"+prep.DeviceUUID, "", nil)
+	mustJSON(t, rec.Body.Bytes(), &d)
+	if d.Status != "active" {
+		t.Fatalf("status = %q, want active", d.Status)
 	}
 }
 
@@ -118,11 +215,30 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-func doIngest(t *testing.T, h http.Handler, req shared.IngestRequest) *httptest.ResponseRecorder {
+func sample1(now time.Time) shared.IngestRequest {
+	return shared.IngestRequest{Samples: []shared.Sample{{ClientTS: now.Unix(), MonitorOn: 1, Exe: "a.exe"}}}
+}
+
+func doIngest(t *testing.T, h http.Handler, token string, req shared.IngestRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	body, _ := json.Marshal(req)
-	r := httptest.NewRequest(http.MethodPost, "/api/ingest", bytes.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
+	return doJSON(t, h, http.MethodPost, "/api/ingest", token, req)
+}
+
+// doJSON issues a JSON request, optionally with a bearer token, and returns the
+// recorder. A nil body sends no payload.
+func doJSON(t *testing.T, h http.Handler, method, path, token string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var r *http.Request
+	if body == nil {
+		r = httptest.NewRequest(method, path, nil)
+	} else {
+		b, _ := json.Marshal(body)
+		r = httptest.NewRequest(method, path, bytes.NewReader(b))
+		r.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, r)
 	return rec

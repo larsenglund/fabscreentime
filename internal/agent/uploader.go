@@ -12,16 +12,20 @@ import (
 	"github.com/larsenglund/fabscreentime/internal/shared"
 )
 
-// HTTPUploader posts batches to the backend's /api/ingest endpoint.
+// HTTPUploader posts batches to the backend's /api/ingest endpoint, authenticated
+// with the device's API bearer token (PLAN.md §6.3).
 type HTTPUploader struct {
 	BaseURL string
+	Token   string
 	Client  *http.Client
 }
 
-// NewHTTPUploader returns an uploader targeting baseURL (e.g. https://host).
-func NewHTTPUploader(baseURL string) *HTTPUploader {
+// NewHTTPUploader returns an uploader targeting baseURL (e.g. https://host),
+// authenticating with the per-device API token.
+func NewHTTPUploader(baseURL, token string) *HTTPUploader {
 	return &HTTPUploader{
 		BaseURL: baseURL,
+		Token:   token,
 		Client:  &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -38,6 +42,9 @@ func (h *HTTPUploader) Upload(ctx context.Context, req shared.IngestRequest) (sh
 		return out, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if h.Token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+h.Token)
+	}
 	resp, err := h.Client.Do(httpReq)
 	if err != nil {
 		return out, err

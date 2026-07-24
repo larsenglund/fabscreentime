@@ -6,15 +6,12 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -30,10 +27,13 @@ var (
 	Build   = "0"
 )
 
+const defaultServer = "http://localhost:8080"
+
 func main() {
-	server := flag.String("server", "http://localhost:8080", "backend base URL")
+	server := flag.String("server", defaultServer, "backend base URL")
 	interval := flag.Duration("interval", time.Minute, "sample interval")
-	dataDir := flag.String("datadir", agent.InstallDir(), "directory for device id + queue")
+	dataDir := flag.String("datadir", agent.InstallDir(), "directory for credentials + queue")
+	enroll := flag.String("enroll", "", "one-time enrollment secret (dev/manual; the installer uses enroll.json)")
 	once := flag.Bool("once", false, "sample once, print the reading as JSON, and exit (CI smoke test)")
 	install := flag.Bool("install", false, "install silent autostart (hidden logon Scheduled Task) and exit")
 	uninstall := flag.Bool("uninstall", false, "remove the autostart Scheduled Task and exit")
@@ -78,13 +78,17 @@ func main() {
 	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
 		log.Fatalf("datadir: %v", err)
 	}
-	deviceUUID, err := loadOrCreateDeviceID(filepath.Join(*dataDir, "device_id"))
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	serverURL, creds, err := resolveCredentials(ctx, *server, *dataDir, *enroll)
 	if err != nil {
-		log.Fatalf("device id: %v", err)
+		log.Fatalf("credentials: %v", err)
 	}
 	hostname, _ := os.Hostname()
 
-	queue, err := agent.NewQueue(filepath.Join(*dataDir, "queue.json"), 0)
+	queue, err := agent.NewQueue(fpJoin(*dataDir, "queue.json"), 0)
 	if err != nil {
 		log.Fatalf("queue: %v", err)
 	}
@@ -92,38 +96,94 @@ func main() {
 	// Self-update is enabled only if keys are pinned (fail-closed, PLAN.md §5.3).
 	var updater agent.Updater
 	if keys := agent.PinnedUpdateKeys(); len(keys) > 0 {
-		updater = agent.NewSelfUpdater(*server, build, keys)
+		updater = agent.NewSelfUpdater(serverURL, build, keys)
 	} else {
 		log.Print("no pinned update keys compiled in — self-update disabled")
 	}
 
 	a := agent.New(agent.Config{
-		DeviceUUID:   deviceUUID,
+		DeviceUUID:   creds.DeviceUUID,
 		Hostname:     hostname,
 		AgentVersion: Version,
 		Build:        build,
 		Interval:     *interval,
-	}, agent.NewSampler(), queue, agent.NewHTTPUploader(*server), updater)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	}, agent.NewSampler(), queue, agent.NewHTTPUploader(serverURL, creds.APIToken), updater)
 
 	log.Printf("agent %s (build %d) starting: device=%s host=%s server=%s interval=%s",
-		Version, build, deviceUUID, hostname, *server, *interval)
+		Version, build, creds.DeviceUUID, hostname, serverURL, *interval)
 	a.Run(ctx)
 }
 
-func loadOrCreateDeviceID(path string) (string, error) {
-	if b, err := os.ReadFile(path); err == nil && len(b) >= 8 {
-		return string(b), nil
+// resolveCredentials returns the server URL and durable credentials, enrolling on
+// first run if a one-time secret is available (from -enroll or the installer's
+// enroll.json). Returns an error only when the agent cannot obtain an identity.
+func resolveCredentials(ctx context.Context, serverFlag, dataDir, enrollFlag string) (string, *agent.Credentials, error) {
+	if creds, err := agent.LoadCredentials(dataDir); err != nil {
+		return "", nil, fmt.Errorf("load credentials: %w", err)
+	} else if creds != nil {
+		return serverFlag, creds, nil
 	}
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
+
+	// Not enrolled yet: find a one-time secret. The -enroll flag wins; otherwise
+	// read the installer's enroll.json sidecar.
+	secret, server := enrollFlag, serverFlag
+	if secret == "" {
+		if cfg, err := agent.ReadEnrollFile(dataDir); err != nil {
+			return "", nil, fmt.Errorf("read enroll.json: %w", err)
+		} else if cfg != nil {
+			secret = cfg.EnrollSecret
+			// A manual double-click may not pass -server; take it from the sidecar.
+			if serverFlag == defaultServer && cfg.Server != "" {
+				server = cfg.Server
+			}
+		}
 	}
-	id := hex.EncodeToString(buf)
-	if err := os.WriteFile(path, []byte(id), 0o600); err != nil {
-		return "", err
+	if secret == "" {
+		return "", nil, fmt.Errorf("no credentials and no enrollment secret; add this device from the dashboard")
 	}
-	return id, nil
+
+	creds, err := enrollWithRetry(ctx, server, secret)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := agent.SaveCredentials(dataDir, creds); err != nil {
+		return "", nil, fmt.Errorf("save credentials: %w", err)
+	}
+	agent.RemoveEnrollFile(dataDir)
+	log.Printf("enrolled as device %s", creds.DeviceUUID)
+	return server, creds, nil
 }
+
+// enrollWithRetry retries transient enrollment failures with backoff. A rejected
+// secret (expired/used/unknown) is terminal and returned immediately.
+func enrollWithRetry(ctx context.Context, server, secret string) (*agent.Credentials, error) {
+	backoff := []time.Duration{0, 2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second}
+	var lastErr error
+	for _, d := range backoff {
+		if d > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(d):
+			}
+		}
+		creds, err := agent.Enroll(ctx, server, secret, hostnameOrEmpty())
+		if err == nil {
+			return creds, nil
+		}
+		if err == agent.ErrEnrollRejected {
+			return nil, fmt.Errorf("enrollment rejected (secret expired, already used, or unknown)")
+		}
+		lastErr = err
+		log.Printf("enroll attempt failed, will retry: %v", err)
+	}
+	return nil, fmt.Errorf("enrollment failed after retries: %w", lastErr)
+}
+
+func hostnameOrEmpty() string {
+	h, _ := os.Hostname()
+	return h
+}
+
+// fpJoin avoids importing path/filepath just for one call site.
+func fpJoin(dir, name string) string { return dir + string(os.PathSeparator) + name }

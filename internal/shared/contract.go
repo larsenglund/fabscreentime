@@ -76,3 +76,62 @@ type IngestResponse struct {
 	ServerTime int64      `json:"server_time"` // drives agent clock reconciliation (§4.8)
 	Update     UpdateInfo `json:"update"`
 }
+
+// --- Enrollment & device auth (PLAN.md §6.3, §7.3) -------------------------
+//
+// Two credential planes stay strictly separate: a one-time enrollment secret
+// (minted by the dashboard, consumed once by a new agent) is exchanged on first
+// contact for a durable per-device API token. The API token is the bearer
+// credential for every /api/ingest call thereafter. Only hashes are stored
+// server-side; the plaintext secret/token each cross the wire exactly once.
+
+// PrepareEnrollRequest is the dashboard-side request that mints an enrollment
+// token for a new machine. In production this endpoint sits behind Cloudflare
+// Access; the agent-facing endpoints below stay public.
+type PrepareEnrollRequest struct {
+	Name string `json:"name"`
+}
+
+// PrepareEnrollResponse carries the one-time secret (shown once) bound to a new
+// pending device slot. The installer embeds EnrollSecret in its file body — it
+// is never placed in a URL, so it can't leak into edge/proxy logs (§7.3).
+type PrepareEnrollResponse struct {
+	DeviceUUID   string `json:"device_uuid"`
+	EnrollSecret string `json:"enroll_secret"`
+	ExpiresIn    int    `json:"expires_in"` // seconds until the secret expires
+}
+
+// EnrollRequest is POST /api/enroll (public): a new agent presenting its
+// one-time secret to obtain a durable API token.
+type EnrollRequest struct {
+	EnrollSecret string `json:"enroll_secret"`
+	Hostname     string `json:"hostname"`
+}
+
+// EnrollResponse returns the durable per-device credentials. APIToken is shown
+// exactly once — the server keeps only its hash.
+type EnrollResponse struct {
+	DeviceUUID      string `json:"device_uuid"`
+	APIToken        string `json:"api_token"`
+	IngestIntervalS int    `json:"ingest_interval_s"`
+}
+
+// DeviceStatus is a device row for the dashboard device list and the "waiting
+// for first check-in" enrollment poll. Status is one of: pending (secret minted,
+// not yet used), active (enrolled and reporting), expired (secret lapsed unused),
+// revoked.
+type DeviceStatus struct {
+	DeviceUUID   string `json:"device_uuid"`
+	Name         string `json:"name"`
+	Hostname     string `json:"hostname"`
+	Status       string `json:"status"`
+	LastSeen     int64  `json:"last_seen"`
+	AgentVersion string `json:"agent_version"`
+	EnrolledAt   int64  `json:"enrolled_at"`
+}
+
+// PatchDeviceRequest updates a device from the dashboard (rename / revoke).
+type PatchDeviceRequest struct {
+	Name    *string `json:"name,omitempty"`
+	Revoked *bool   `json:"revoked,omitempty"`
+}

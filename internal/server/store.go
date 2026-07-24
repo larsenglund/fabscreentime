@@ -1,13 +1,25 @@
 package server
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver, registered as "sqlite"
 
 	"github.com/larsenglund/fabscreentime/internal/shared"
+)
+
+// Enrollment / device-auth errors (mapped to 401 by the handlers).
+var (
+	// ErrEnrollInvalid means the presented secret is unknown, expired, or already used.
+	ErrEnrollInvalid = errors.New("enrollment token invalid, expired, or already used")
+	// ErrNoDevice means no active (non-revoked) device holds the presented API token.
+	ErrNoDevice = errors.New("no active device for token")
 )
 
 // clamp window for agent-supplied timestamps (PLAN.md §6.3). Rows outside this
@@ -29,6 +41,12 @@ CREATE TABLE IF NOT EXISTS devices (
     last_seen           INTEGER,
     agent_version       TEXT,
     monitor_detect_mode TEXT NOT NULL DEFAULT 'connection',
+    api_token_hash      TEXT,               -- SHA-256 of the durable per-device token (NULL until enrolled)
+    enroll_token_hash   TEXT,               -- SHA-256 of the one-time enrollment secret (NULL once consumed)
+    enroll_expires      INTEGER,            -- unix seconds; the enrollment secret is void after this
+    enrolled_at         INTEGER,
+    enroll_ip           TEXT,               -- true client IP at enrollment (audit)
+    revoked             INTEGER NOT NULL DEFAULT 0,
     created_at          INTEGER NOT NULL
 );
 
@@ -101,14 +119,216 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	// Additive migration for databases created before the column existed; on an
+	// Additive migrations for databases created before a column existed; on an
 	// up-to-date schema the duplicate-column error is expected and ignored.
-	if _, err := db.Exec(`ALTER TABLE samples ADD COLUMN ddc_power INTEGER`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column") {
-		db.Close()
-		return nil, err
+	for _, stmt := range []string{
+		`ALTER TABLE samples ADD COLUMN ddc_power INTEGER`,
+		`ALTER TABLE devices ADD COLUMN api_token_hash TEXT`,
+		`ALTER TABLE devices ADD COLUMN enroll_token_hash TEXT`,
+		`ALTER TABLE devices ADD COLUMN enroll_expires INTEGER`,
+		`ALTER TABLE devices ADD COLUMN enrolled_at INTEGER`,
+		`ALTER TABLE devices ADD COLUMN enroll_ip TEXT`,
+		`ALTER TABLE devices ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			db.Close()
+			return nil, err
+		}
+	}
+	// Token lookups are per-ingest hot-path; index them (after the ALTERs so the
+	// columns exist on migrated databases).
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_devices_api_token ON devices(api_token_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_devices_enroll_token ON devices(enroll_token_hash)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return &Store{db: db}, nil
+}
+
+// randomToken returns a 256-bit secret as hex (enrollment secrets + API tokens).
+func randomToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// randomUUID returns a 128-bit opaque device identifier as hex.
+func randomUUID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// hashToken is the at-rest form of every secret — only hashes are stored, so a
+// database leak never yields a usable enrollment secret or API token.
+func hashToken(t string) string {
+	sum := sha256.Sum256([]byte(t))
+	return hex.EncodeToString(sum[:])
+}
+
+// PrepareEnrollment creates a pending device slot and returns its UUID plus a
+// one-time enrollment secret (returned in plaintext exactly once; only its hash
+// is stored). The secret is valid until `expires`.
+func (s *Store) PrepareEnrollment(name string, now, expires int64) (uuid, secret string, err error) {
+	uuid, err = randomUUID()
+	if err != nil {
+		return "", "", err
+	}
+	secret, err = randomToken()
+	if err != nil {
+		return "", "", err
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO devices (device_uuid, name, enroll_token_hash, enroll_expires, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		uuid, name, hashToken(secret), expires, now)
+	if err != nil {
+		return "", "", err
+	}
+	return uuid, secret, nil
+}
+
+// ConsumeEnrollment validates a one-time secret and, atomically, issues a
+// durable API token for that device. Single-use is enforced by requiring
+// api_token_hash IS NULL and setting it in the same transaction (the store's
+// single writer serializes concurrent attempts). Returns ErrEnrollInvalid if no
+// unused, unexpired, non-revoked slot matches.
+func (s *Store) ConsumeEnrollment(secret, hostname, ip string, now int64) (uuid, apiToken string, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback()
+
+	var id int64
+	err = tx.QueryRow(`
+		SELECT id, device_uuid FROM devices
+		WHERE enroll_token_hash = ? AND api_token_hash IS NULL AND revoked = 0 AND enroll_expires >= ?`,
+		hashToken(secret), now).Scan(&id, &uuid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrEnrollInvalid
+	}
+	if err != nil {
+		return "", "", err
+	}
+
+	apiToken, err = randomToken()
+	if err != nil {
+		return "", "", err
+	}
+	if _, err = tx.Exec(`
+		UPDATE devices
+		SET api_token_hash = ?, enrolled_at = ?, enroll_ip = ?, hostname = ?, last_seen = ?,
+		    enroll_token_hash = NULL, enroll_expires = NULL
+		WHERE id = ?`,
+		hashToken(apiToken), now, ip, hostname, now, id); err != nil {
+		return "", "", err
+	}
+	if err = tx.Commit(); err != nil {
+		return "", "", err
+	}
+	return uuid, apiToken, nil
+}
+
+// DeviceByToken returns the device id for a presented API token, rejecting
+// unknown and revoked tokens with ErrNoDevice (both → 401, indistinguishable to
+// a caller holding a bad token).
+func (s *Store) DeviceByToken(apiToken string) (int64, error) {
+	var id int64
+	var revoked int
+	err := s.db.QueryRow(`SELECT id, revoked FROM devices WHERE api_token_hash = ?`,
+		hashToken(apiToken)).Scan(&id, &revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNoDevice
+	}
+	if err != nil {
+		return 0, err
+	}
+	if revoked != 0 {
+		return 0, ErrNoDevice
+	}
+	return id, nil
+}
+
+// TouchDevice updates liveness fields for an authenticated device. An empty
+// hostname leaves the stored value untouched (COALESCE), so a sparse ingest
+// never blanks it.
+func (s *Store) TouchDevice(id int64, hostname, version string, now int64) error {
+	_, err := s.db.Exec(`
+		UPDATE devices SET last_seen = ?, agent_version = ?,
+		    hostname = COALESCE(NULLIF(?, ''), hostname)
+		WHERE id = ?`,
+		now, version, hostname, id)
+	return err
+}
+
+// SetRevoked flips a device's revoked flag by UUID. A revoked device's next
+// ingest fails auth (§Phase 3 verify: revoke → uploads 401).
+func (s *Store) SetRevoked(uuid string, revoked bool) error {
+	_, err := s.db.Exec(`UPDATE devices SET revoked = ? WHERE device_uuid = ?`, boolToInt(revoked), uuid)
+	return err
+}
+
+// RenameDevice sets a device's display name by UUID.
+func (s *Store) RenameDevice(uuid, name string) error {
+	_, err := s.db.Exec(`UPDATE devices SET name = ? WHERE device_uuid = ?`, name, uuid)
+	return err
+}
+
+const deviceStatusCols = `device_uuid, name, COALESCE(hostname, ''), COALESCE(last_seen, 0),
+	COALESCE(agent_version, ''), api_token_hash IS NOT NULL, revoked, enroll_expires, COALESCE(enrolled_at, 0)`
+
+func scanDeviceStatus(sc interface{ Scan(...any) error }, now int64) (shared.DeviceStatus, error) {
+	var d shared.DeviceStatus
+	var apiSet, revoked int
+	var enrollExpires sql.NullInt64
+	if err := sc.Scan(&d.DeviceUUID, &d.Name, &d.Hostname, &d.LastSeen,
+		&d.AgentVersion, &apiSet, &revoked, &enrollExpires, &d.EnrolledAt); err != nil {
+		return d, err
+	}
+	switch {
+	case revoked != 0:
+		d.Status = "revoked"
+	case apiSet != 0:
+		d.Status = "active"
+	case enrollExpires.Valid && enrollExpires.Int64 < now:
+		d.Status = "expired"
+	default:
+		d.Status = "pending"
+	}
+	return d, nil
+}
+
+// DeviceStatuses lists every device with a derived status, newest first.
+func (s *Store) DeviceStatuses(now int64) ([]shared.DeviceStatus, error) {
+	rows, err := s.db.Query(`SELECT ` + deviceStatusCols + ` FROM devices ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []shared.DeviceStatus
+	for rows.Next() {
+		d, err := scanDeviceStatus(rows, now)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// DeviceStatusByUUID returns one device's status, or sql.ErrNoRows if unknown.
+func (s *Store) DeviceStatusByUUID(uuid string, now int64) (shared.DeviceStatus, error) {
+	row := s.db.QueryRow(`SELECT `+deviceStatusCols+` FROM devices WHERE device_uuid = ?`, uuid)
+	return scanDeviceStatus(row, now)
 }
 
 // Close closes the database.

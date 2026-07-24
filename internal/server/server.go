@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,7 +17,11 @@ import (
 	"github.com/larsenglund/fabscreentime/internal/shared"
 )
 
-const maxIngestBytes = 1 << 20 // 1 MiB body cap (PLAN.md §6.3)
+const (
+	maxIngestBytes = 1 << 20 // 1 MiB body cap (PLAN.md §6.3)
+	maxEnrollBytes = 8 << 10 // 8 KiB is ample for an enrollment body
+	enrollTTL      = 15 * 60 // one-time enrollment secret lifetime (seconds)
+)
 
 type dirtyKey struct {
 	deviceID int64
@@ -26,71 +32,115 @@ type dirtyKey struct {
 type Server struct {
 	store    *Store
 	now      func() time.Time
-	agentDir string                 // holds manifest.json + agent.exe (may be empty)
-	manifest *shared.SignedManifest // current signed release, loaded at startup
+	agentDir string // holds manifest.json + agent.exe (may be empty)
 
-	mu    sync.Mutex
-	dirty map[dirtyKey]bool // (device, day) pairs whose rollup is stale
+	enrollLimiter *rateLimiter // per-IP cap on the public enrollment endpoint
+
+	mu          sync.Mutex
+	dirty       map[dirtyKey]bool      // (device, day) pairs whose rollup is stale
+	manifest    *shared.SignedManifest // current signed release (hot-reloaded on mtime change)
+	manifestMod time.Time              // mtime of the manifest last loaded
 }
 
 // New returns a Server backed by store. agentDir, if non-empty, is scanned for a
 // signed agent release (manifest.json + agent.exe) to serve for auto-update.
 func New(store *Store, agentDir string) *Server {
-	s := &Server{store: store, now: time.Now, agentDir: agentDir, dirty: map[dirtyKey]bool{}}
-	s.loadManifest()
+	s := &Server{
+		store:         store,
+		now:           time.Now,
+		agentDir:      agentDir,
+		dirty:         map[dirtyKey]bool{},
+		enrollLimiter: newRateLimiter(10, 60), // 10 enroll attempts / minute / IP
+	}
+	if m := s.currentManifest(); m != nil {
+		log.Printf("serving agent release %s (build %d)", m.Manifest.Version, m.Manifest.Build)
+	}
 	return s
 }
 
-// loadManifest reads agentDir/manifest.json if present. The backend is not
-// auto-updated, so this is done once at startup; publishing a new release means
-// dropping new files and restarting (PLAN.md §8.1).
-func (s *Server) loadManifest() {
+// currentManifest returns the signed release to serve, reloading it whenever the
+// on-disk manifest.json changes. Unlike the backend binary (never auto-updated),
+// the *agent* release is re-signed often during development, so hot-reloading on
+// mtime means a fresh `release-local` is picked up without a backend restart.
+func (s *Server) currentManifest() *shared.SignedManifest {
 	if s.agentDir == "" {
-		return
+		return nil
+	}
+	fi, err := os.Stat(filepath.Join(s.agentDir, "manifest.json"))
+	if err != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.manifest // keep last-known on a transient stat error
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !fi.ModTime().After(s.manifestMod) {
+		return s.manifest
 	}
 	data, err := os.ReadFile(filepath.Join(s.agentDir, "manifest.json"))
 	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("agent manifest: %v", err)
-		}
-		return
+		return s.manifest
 	}
 	var sm shared.SignedManifest
 	if err := json.Unmarshal(data, &sm); err != nil {
 		log.Printf("agent manifest parse: %v", err)
-		return
+		return s.manifest
+	}
+	if s.manifest != nil && sm.Manifest.Build != s.manifest.Manifest.Build {
+		log.Printf("reloaded agent release %s (build %d)", sm.Manifest.Version, sm.Manifest.Build)
 	}
 	s.manifest = &sm
-	log.Printf("serving agent release %s (build %d)", sm.Manifest.Version, sm.Manifest.Build)
+	s.manifestMod = fi.ModTime()
+	return s.manifest
 }
 
 // Handler builds the request router (Go 1.22+ method+path patterns, no framework).
+//
+// Two auth planes (PLAN.md §6.3/§7.4): agent endpoints authenticate with a
+// per-device bearer token (ingest) or a one-time secret (enroll) and stay
+// public; the dashboard endpoints (summary, device management, enroll/prepare)
+// carry no device auth and sit behind Cloudflare Access in production.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	// Agent plane (public).
 	mux.HandleFunc("POST /api/ingest", s.handleIngest)
-	mux.HandleFunc("GET /api/dashboard/summary", s.handleSummary)
+	mux.HandleFunc("POST /api/enroll", s.handleEnroll)
 	mux.HandleFunc("GET /agent/manifest", s.handleManifest)
 	mux.HandleFunc("GET /agent/download", s.handleDownload)
+	// Dashboard plane (Cloudflare Access in prod).
+	mux.HandleFunc("POST /api/enroll/prepare", s.handlePrepareEnroll)
+	mux.HandleFunc("GET /api/dashboard/summary", s.handleSummary)
+	mux.HandleFunc("GET /api/devices", s.handleDevices)
+	mux.HandleFunc("GET /api/devices/{uuid}", s.handleDevice)
+	mux.HandleFunc("PATCH /api/devices/{uuid}", s.handleDevicePatch)
+	// Infra.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /", s.handleIndex)
 	return logRequests(mux)
 }
 
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
+	token := bearerToken(r)
+	if token == "" {
+		http.Error(w, "missing bearer token", http.StatusUnauthorized)
+		return
+	}
+	id, err := s.store.DeviceByToken(token)
+	if err != nil {
+		// Unknown and revoked tokens are indistinguishable to the caller (401).
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, maxIngestBytes)
 	var req shared.IngestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.DeviceUUID) == "" {
-		http.Error(w, "device_uuid required", http.StatusBadRequest)
-		return
-	}
 	now := s.now().Unix()
-	id, err := s.store.UpsertDevice(req.DeviceUUID, req.Hostname, req.AgentVersion, now)
-	if err != nil {
-		log.Printf("upsert device: %v", err)
+	if err := s.store.TouchDevice(id, req.Hostname, req.AgentVersion, now); err != nil {
+		log.Printf("touch device: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
@@ -167,21 +217,143 @@ func (s *Server) StartRollupLoop(ctx context.Context, interval time.Duration) {
 // updateFor returns the signed update block. The agent re-verifies the manifest
 // against its pinned keys regardless of Available, so this is only a hint.
 func (s *Server) updateFor(agentBuild int64) shared.UpdateInfo {
-	if s.manifest == nil {
+	m := s.currentManifest()
+	if m == nil {
 		return shared.UpdateInfo{Available: false}
 	}
 	return shared.UpdateInfo{
-		Available: s.manifest.Manifest.Build > agentBuild,
-		Manifest:  s.manifest,
+		Available: m.Manifest.Build > agentBuild,
+		Manifest:  m,
 	}
 }
 
 func (s *Server) handleManifest(w http.ResponseWriter, _ *http.Request) {
-	if s.manifest == nil {
+	m := s.currentManifest()
+	if m == nil {
 		http.Error(w, "no release", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.manifest)
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleEnroll is the public first-contact endpoint: a new agent exchanges its
+// one-time secret for a durable API token. Rate-limited on the true client IP
+// (the enrollment secret is the dangerous credential — PLAN.md §9).
+func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
+	ip := trueClientIP(r)
+	if !s.enrollLimiter.allow(ip, s.now().Unix()) {
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxEnrollBytes)
+	var req shared.EnrollRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.EnrollSecret) == "" {
+		http.Error(w, "enroll_secret required", http.StatusBadRequest)
+		return
+	}
+	uuid, apiToken, err := s.store.ConsumeEnrollment(req.EnrollSecret, req.Hostname, ip, s.now().Unix())
+	if errors.Is(err, ErrEnrollInvalid) {
+		http.Error(w, "enrollment rejected", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		log.Printf("enroll: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("enrolled device %s from %s (host %q)", uuid, ip, req.Hostname)
+	writeJSON(w, http.StatusOK, shared.EnrollResponse{
+		DeviceUUID:      uuid,
+		APIToken:        apiToken,
+		IngestIntervalS: 60,
+	})
+}
+
+// handlePrepareEnroll mints a one-time enrollment secret bound to a new pending
+// device (dashboard-side — behind Cloudflare Access in production).
+func (s *Server) handlePrepareEnroll(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxEnrollBytes)
+	var req shared.PrepareEnrollRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "New device"
+	}
+	now := s.now().Unix()
+	uuid, secret, err := s.store.PrepareEnrollment(name, now, now+enrollTTL)
+	if err != nil {
+		log.Printf("prepare enroll: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, shared.PrepareEnrollResponse{
+		DeviceUUID:   uuid,
+		EnrollSecret: secret,
+		ExpiresIn:    enrollTTL,
+	})
+}
+
+func (s *Server) handleDevices(w http.ResponseWriter, _ *http.Request) {
+	list, err := s.store.DeviceStatuses(s.now().Unix())
+	if err != nil {
+		log.Printf("devices: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if list == nil {
+		list = []shared.DeviceStatus{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"devices": list})
+}
+
+func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
+	d, err := s.store.DeviceStatusByUUID(r.PathValue("uuid"), s.now().Unix())
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
+func (s *Server) handleDevicePatch(w http.ResponseWriter, r *http.Request) {
+	uuid := r.PathValue("uuid")
+	if _, err := s.store.DeviceStatusByUUID(uuid, s.now().Unix()); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxEnrollBytes)
+	var req shared.PatchDeviceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if req.Name != nil {
+		if err := s.store.RenameDevice(uuid, strings.TrimSpace(*req.Name)); err != nil {
+			log.Printf("rename device: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+	}
+	if req.Revoked != nil {
+		if err := s.store.SetRevoked(uuid, *req.Revoked); err != nil {
+			log.Printf("revoke device: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+	}
+	d, err := s.store.DeviceStatusByUUID(uuid, s.now().Unix())
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +426,63 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// bearerToken extracts a "Authorization: Bearer <token>" value, or "".
+func bearerToken(r *http.Request) string {
+	const prefix = "Bearer "
+	h := r.Header.Get("Authorization")
+	if strings.HasPrefix(h, prefix) {
+		return strings.TrimSpace(h[len(prefix):])
+	}
+	return ""
+}
+
+// trueClientIP prefers Cloudflare's CF-Connecting-IP (set by the trusted edge)
+// over the spoofable X-Forwarded-For, falling back to the socket peer (PLAN.md
+// §6.3). Used only for enrollment audit + rate-limiting, never for auth.
+func trueClientIP(r *http.Request) string {
+	if ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); ip != "" {
+		return ip
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// rateLimiter is a fixed-window per-key counter — small and dependency-free,
+// sized for the low-volume enrollment endpoint (not the ingest hot path).
+type rateLimiter struct {
+	mu     sync.Mutex
+	hits   map[string][]int64
+	max    int
+	window int64 // seconds
+}
+
+func newRateLimiter(max int, windowSecs int64) *rateLimiter {
+	return &rateLimiter{hits: map[string][]int64{}, max: max, window: windowSecs}
+}
+
+// allow records an attempt for key at `now` and reports whether it is within the
+// per-window cap. Entries older than the window are pruned on access, so the map
+// stays bounded for the small set of enrolling IPs.
+func (rl *rateLimiter) allow(key string, now int64) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := now - rl.window
+	kept := rl.hits[key][:0]
+	for _, t := range rl.hits[key] {
+		if t > cutoff {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= rl.max {
+		rl.hits[key] = kept
+		return false
+	}
+	rl.hits[key] = append(kept, now)
+	return true
 }
 
 func logRequests(next http.Handler) http.Handler {
