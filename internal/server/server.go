@@ -127,6 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/devices", s.handleDevices)
 	mux.HandleFunc("GET /api/devices/{uuid}", s.handleDevice)
 	mux.HandleFunc("PATCH /api/devices/{uuid}", s.handleDevicePatch)
+	mux.HandleFunc("DELETE /api/devices/{uuid}", s.handleDeleteDevice)
 	mux.HandleFunc("GET /api/devices/{uuid}/timeline", s.handleTimeline)
 	mux.HandleFunc("GET /api/devices/{uuid}/top-apps", s.handleTopApps)
 	mux.HandleFunc("GET /api/devices/{uuid}/signals", s.handleSignals)
@@ -410,6 +411,37 @@ func (s *Server) handleDevicePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, d)
+}
+
+func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
+	uuid := r.PathValue("uuid")
+	id, err := s.store.DeleteDevice(uuid)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("delete device: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	// Drop any pending rollups for the now-gone device, or the rollup ticker
+	// would keep trying to write daily_stats for a missing device_id and fail
+	// the foreign key forever.
+	s.forgetDirtyDevice(id)
+	log.Printf("deleted device %s (id %d) and its data", uuid, id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// forgetDirtyDevice removes every dirty (device, day) entry for one device.
+func (s *Server) forgetDirtyDevice(deviceID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.dirty {
+		if k.deviceID == deviceID {
+			delete(s.dirty, k)
+		}
+	}
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {

@@ -1,16 +1,14 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, Download, Loader2, X } from "lucide-react";
-import { buildInstaller, usePrepareEnroll, type DeviceStatus } from "../lib/api";
+import { Check, Download, Loader2, X } from "lucide-react";
+import { buildBatInstaller, manifestSHA256, usePrepareEnroll, type DeviceStatus } from "../lib/api";
 import { Button } from "./ui/button";
-
-const RUN_CMD = "powershell -ExecutionPolicy Bypass -File .\\install-fabscreentime.ps1";
 
 export function AddDeviceDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [name, setName] = useState("");
   const [secret, setSecret] = useState<string | null>(null);
+  const [sha, setSha] = useState("");
   const [uuid, setUuid] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
-  const [copied, setCopied] = useState(false);
   const prepare = usePrepareEnroll();
 
   // Reset when the dialog is (re)opened.
@@ -18,6 +16,7 @@ export function AddDeviceDialog({ open, onClose }: { open: boolean; onClose: () 
     if (open) {
       setName("");
       setSecret(null);
+      setSha("");
       setUuid(null);
       setConnected(false);
       prepare.reset();
@@ -49,22 +48,24 @@ export function AddDeviceDialog({ open, onClose }: { open: boolean; onClose: () 
 
   if (!open) return null;
 
-  function download(secretValue: string) {
-    const script = buildInstaller(window.location.origin, secretValue);
-    const url = URL.createObjectURL(new Blob([script], { type: "text/plain" }));
+  function download(secretValue: string, shaValue: string) {
+    const bat = buildBatInstaller(window.location.origin, secretValue, shaValue);
+    const url = URL.createObjectURL(new Blob([bat], { type: "application/octet-stream" }));
     const a = document.createElement("a");
     a.href = url;
-    a.download = "install-fabscreentime.ps1";
+    a.download = "install-fabscreentime.bat";
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   async function generate() {
     const res = await prepare.mutateAsync(name.trim());
+    const shaValue = await manifestSHA256();
     setSecret(res.enroll_secret);
+    setSha(shaValue);
     setUuid(res.device_uuid);
     setConnected(false);
-    download(res.enroll_secret);
+    download(res.enroll_secret, shaValue);
   }
 
   return (
@@ -106,33 +107,23 @@ export function AddDeviceDialog({ open, onClose }: { open: boolean; onClose: () 
 
           {secret && (
             <>
-              <Step n={2} title="On the new PC, run once in PowerShell">
-                <p className="mb-2 text-sm text-muted-foreground">
-                  The downloaded installer carries a one-time key in its body. Move it to the target
-                  PC, then run:
+              <Step n={2} title="Run the installer on that PC">
+                <p className="mb-3 text-sm text-muted-foreground">
+                  The installer just downloaded. Put{" "}
+                  <code className="rounded bg-muted px-1 py-0.5 text-[12px]">install-fabscreentime.bat</code>{" "}
+                  on the new PC and <strong>double-click it</strong> — no terminal, nothing to type.
                 </p>
-                <pre className="overflow-x-auto rounded-lg border bg-muted px-3 py-2.5 text-[13px]">
-                  {RUN_CMD}
-                </pre>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <Button variant="outline" size="sm" onClick={() => download(secret)}>
-                    <Download className="size-4" /> Download again
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      navigator.clipboard?.writeText(RUN_CMD);
-                      setCopied(true);
-                      setTimeout(() => setCopied(false), 1500);
-                    }}
-                  >
-                    {copied ? <Check className="size-4" /> : <Copy className="size-4" />} Copy command
-                  </Button>
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  Installs silently (no window or tray), starts at logon, and self-updates.
-                </p>
+                <Button onClick={() => download(secret, sha)}>
+                  <Download className="size-4" /> Download installer
+                </Button>
+                <ul className="mt-3 space-y-1 text-xs text-muted-foreground">
+                  <li>
+                    • If the browser or Windows warns about the file, choose <strong>Keep</strong> /{" "}
+                    <strong>Run anyway</strong> — it's your own server.
+                  </li>
+                  <li>• Installs silently (no window or tray), starts at logon, and self-updates.</li>
+                  <li>• Run it within ~15 minutes; the one-time key expires.</li>
+                </ul>
               </Step>
 
               <Step n={3} title="Wait for first check-in">

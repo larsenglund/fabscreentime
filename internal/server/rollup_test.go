@@ -210,6 +210,35 @@ func TestInsertSamplesStoresRawDDCPower(t *testing.T) {
 	}
 }
 
+// Rolling up a device that was deleted mid-cycle must be a clean no-op, not the
+// FK-error loop the delete-during-ingest race could otherwise trigger.
+func TestRollupDayOnDeletedDeviceIsNoOp(t *testing.T) {
+	st := openTestStore(t)
+	id, err := st.UpsertDevice("gone", "h", "1", dayBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.InsertSamples(id, []shared.Sample{
+		{ClientTS: dayBase + 60, MonitorOn: 1, Exe: "a.exe"},
+	}, dayBase+120); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DeleteDevice("gone"); err != nil {
+		t.Fatal(err)
+	}
+	// This used to fail the daily_stats foreign key; it must now be a no-op.
+	if err := st.RollupDay(id, DayUTC(dayBase), dayBase+86400); err != nil {
+		t.Fatalf("RollupDay on deleted device returned error: %v", err)
+	}
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM daily_stats WHERE device_id=?`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("daily_stats created for a deleted device: %d rows", n)
+	}
+}
+
 func TestDashboardQueries(t *testing.T) {
 	st := openTestStore(t)
 	id, err := st.UpsertDevice("dev-dash", "host", "1.0", dayBase)

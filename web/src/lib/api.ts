@@ -166,25 +166,111 @@ export function usePatchDevice() {
   });
 }
 
-/** Build the personalized silent installer (PowerShell) client-side so the
- *  one-time secret lives in the file BODY, never a URL (PLAN.md §7.3). */
-export function buildInstaller(server: string, secret: string): string {
-  return [
-    "$ErrorActionPreference = 'Stop'",
-    `$Server = '${server}'`,
-    `$Secret = '${secret}'`,
-    "$dir = Join-Path $env:ProgramData 'FabScreenTime'",
-    "New-Item -ItemType Directory -Force -Path $dir | Out-Null",
-    "$exe = Join-Path $dir 'agent.exe'",
-    'Write-Host "Downloading agent from $Server ..."',
-    'Invoke-WebRequest -UseBasicParsing -Uri "$Server/agent/download" -OutFile $exe',
-    "try {",
-    '  $m = Invoke-RestMethod -UseBasicParsing -Uri "$Server/agent/manifest"',
-    "  $h = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()",
-    '  if ($m.manifest.sha256 -and $m.manifest.sha256 -ne $h) { throw "agent.exe hash mismatch" }',
-    '} catch { Write-Warning "manifest check skipped: $_" }',
-    "(@{ server = $Server; enroll_secret = $Secret } | ConvertTo-Json) | Set-Content -Path (Join-Path $dir 'enroll.json') -Encoding UTF8",
-    "& $exe -install -server $Server",
-    "Write-Host 'Installed. It should appear on the dashboard within a minute.'",
-  ].join("\r\n");
+async function del(url: string): Promise<void> {
+  const r = await fetch(url, { method: "DELETE" });
+  if (!r.ok) throw new Error(`${url} → ${r.status}`);
+}
+
+export function useDeleteDevice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (uuid: string) => del(`/api/devices/${uuid}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["devices"] });
+      qc.invalidateQueries({ queryKey: ["summary"] });
+    },
+  });
+}
+
+/** manifestSHA256 fetches the served agent's expected hash, or "" if no release
+ *  is published (the installer then skips the integrity check). */
+export async function manifestSHA256(): Promise<string> {
+  try {
+    const r = await fetch("/agent/manifest");
+    if (!r.ok) return "";
+    const m = await r.json();
+    return m?.manifest?.sha256 ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Build a double-clickable .bat installer client-side so the one-time secret
+ *  lives in the file BODY, never a URL (PLAN.md §7.3). It uses only tools built
+ *  into Windows 10+ (curl, certutil) — no PowerShell, no terminal: the user
+ *  double-clicks it. curl-downloaded files carry no Mark-of-the-Web, so the
+ *  agent itself runs without a SmartScreen prompt; only the .bat does. */
+export function buildBatInstaller(server: string, secret: string, sha: string): string {
+  const lines = [
+    "@echo off",
+    "setlocal enabledelayedexpansion",
+    "title FabScreenTime setup",
+    `set "SERVER=${server}"`,
+    `set "SECRET=${secret}"`,
+    `set "SHA=${sha}"`,
+    'set "DIR=%ProgramData%\\FabScreenTime"',
+    "echo(",
+    "echo   Setting up the FabScreenTime agent on this PC...",
+    "echo(",
+    'if not exist "%DIR%" mkdir "%DIR%" 2>nul',
+    "",
+    "rem Reuse an already-correct agent, so re-running is safe: a running agent",
+    "rem locks its own .exe and a fresh download would fail to overwrite it.",
+    "if not defined SHA goto :download",
+    'if not exist "%DIR%\\agent.exe" goto :download',
+    'set "HAVE="',
+    `for /f "skip=1 delims=" %%H in ('certutil -hashfile "%DIR%\\agent.exe" SHA256 2^>nul') do if not defined HAVE set "HAVE=%%H"`,
+    'set "HAVE=!HAVE: =!"',
+    'if /I "!HAVE!"=="%SHA%" goto :reuse',
+    "goto :download",
+    "",
+    ":reuse",
+    "echo   - agent already present, reusing it",
+    "goto :enroll",
+    "",
+    ":download",
+    "echo   - downloading agent",
+    'curl -fsS -o "%DIR%\\agent.exe" "%SERVER%/agent/download"',
+    "if errorlevel 1 goto :fail_dl",
+    "if not defined SHA goto :enroll",
+    "echo   - verifying download",
+    'set "GOT="',
+    `for /f "skip=1 delims=" %%H in ('certutil -hashfile "%DIR%\\agent.exe" SHA256 2^>nul') do if not defined GOT set "GOT=%%H"`,
+    'set "GOT=!GOT: =!"',
+    'if /I not "!GOT!"=="%SHA%" goto :fail_hash',
+    "",
+    ":enroll",
+    "echo   - enrolling this device",
+    '> "%DIR%\\enroll.json" echo {"server":"%SERVER%","enroll_secret":"%SECRET%"}',
+    "echo   - installing background agent",
+    '"%DIR%\\agent.exe" -install -server "%SERVER%"',
+    "if errorlevel 1 goto :fail_install",
+    "echo(",
+    "echo   All set. This PC will appear on the dashboard within a minute.",
+    "echo   You can close this window.",
+    "timeout /t 8 >nul",
+    "exit /b 0",
+    "",
+    ":fail_dl",
+    "echo(",
+    "echo   ERROR: could not download the agent from %SERVER%",
+    "echo   - If you are reinstalling, the agent may already be running (its file is",
+    "echo     locked). The existing install is fine, or restart the PC and try again.",
+    "echo   - Otherwise, make sure this PC can reach the server and run this again.",
+    "pause",
+    "exit /b 1",
+    "",
+    ":fail_hash",
+    "echo(",
+    "echo   ERROR: the downloaded agent failed verification. Aborting for safety.",
+    "pause",
+    "exit /b 1",
+    "",
+    ":fail_install",
+    "echo(",
+    "echo   ERROR: install failed. See %DIR%\\agent.log for details.",
+    "pause",
+    "exit /b 1",
+  ];
+  return lines.join("\r\n") + "\r\n";
 }

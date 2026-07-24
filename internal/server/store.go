@@ -303,6 +303,40 @@ func (s *Store) RenameDevice(uuid, name string) error {
 	return err
 }
 
+// DeleteDevice removes a device and ALL of its data (raw samples, monitor
+// events, and daily rollups), returning the deleted row id. Unlike revoke —
+// which keeps the row and its history but blocks the token — this erases the
+// device entirely, for clearing out test/duplicate/decommissioned machines.
+// Returns sql.ErrNoRows if the UUID is unknown.
+func (s *Store) DeleteDevice(uuid string) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var id int64
+	if err := tx.QueryRow(`SELECT id FROM devices WHERE device_uuid = ?`, uuid).Scan(&id); err != nil {
+		return 0, err // sql.ErrNoRows when unknown
+	}
+	// Children first (foreign_keys=ON would otherwise reject the devices delete).
+	for _, stmt := range []string{
+		`DELETE FROM samples WHERE device_id = ?`,
+		`DELETE FROM monitor_events WHERE device_id = ?`,
+		`DELETE FROM daily_stats WHERE device_id = ?`,
+		`DELETE FROM daily_app_stats WHERE device_id = ?`,
+		`DELETE FROM devices WHERE id = ?`,
+	} {
+		if _, err := tx.Exec(stmt, id); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
 const deviceStatusCols = `device_uuid, name, COALESCE(hostname, ''), COALESCE(last_seen, 0),
 	COALESCE(agent_version, ''), api_token_hash IS NOT NULL, revoked, enroll_expires, COALESCE(enrolled_at, 0),
 	log_titles`
@@ -521,6 +555,18 @@ func (s *Store) MonitorOnSeconds(deviceID, from, to int64) (int64, error) {
 // capped at `now` so an unterminated "on" interval on the current day isn't
 // integrated into the future (which would massively overcount today's minutes).
 func (s *Store) RollupDay(deviceID int64, day string, now int64) error {
+	// Skip a device that no longer exists (e.g. deleted mid-cycle). The
+	// daily_stats upsert below would otherwise FK-fail with foreign_keys=ON, and
+	// RunRollups re-marks the day on any error — an endless per-tick error loop.
+	// This guard closes that regardless of any delete-vs-ingest ordering race.
+	var exists int
+	if err := s.db.QueryRow(`SELECT 1 FROM devices WHERE id=?`, deviceID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+
 	dayStart, err := time.Parse("2006-01-02", day)
 	if err != nil {
 		return err

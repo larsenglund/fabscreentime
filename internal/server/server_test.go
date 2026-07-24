@@ -240,6 +240,59 @@ func TestTitleOptOutStripsOnIngest(t *testing.T) {
 	}
 }
 
+func TestDeleteDeviceRemovesEverything(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	srv, st := newTestServer(t, now)
+	h := srv.Handler()
+	uuid, token := enrollDevice(t, h, "to-delete")
+
+	// Ingest a sample + a transition so there is child data and a dirty rollup.
+	doIngest(t, h, token, shared.IngestRequest{
+		Samples: []shared.Sample{{ClientTS: now.Unix(), MonitorOn: 1, Exe: "a.exe"}},
+		Events:  []shared.MonitorEvent{{ClientTS: now.Unix(), MonitorOn: 1}},
+	})
+	srv.mu.Lock()
+	dirtyBefore := len(srv.dirty)
+	srv.mu.Unlock()
+	if dirtyBefore == 0 {
+		t.Fatal("expected a dirty rollup entry after ingest")
+	}
+
+	// Delete it.
+	if rec := doJSON(t, h, http.MethodDelete, "/api/devices/"+uuid, "", nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete = %d, want 204", rec.Code)
+	}
+
+	// Gone from the registry; its token no longer authenticates.
+	if _, err := st.DeviceStatusByUUID(uuid, now.Unix()); err == nil {
+		t.Fatal("device still present after delete")
+	}
+	if r := doIngest(t, h, token, sample1(now)); r.Code != http.StatusUnauthorized {
+		t.Fatalf("post-delete ingest = %d, want 401", r.Code)
+	}
+	// Child data erased.
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM samples`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("samples remain after delete: %d", n)
+	}
+	// Dirty set purged, so the rollup ticker won't error-loop on the gone device.
+	srv.mu.Lock()
+	dirtyAfter := len(srv.dirty)
+	srv.mu.Unlock()
+	if dirtyAfter != 0 {
+		t.Fatalf("dirty not purged: %d", dirtyAfter)
+	}
+	srv.RunRollups() // must be a no-op, not an FK error loop
+
+	// Deleting an unknown UUID → 404.
+	if r := doJSON(t, h, http.MethodDelete, "/api/devices/does-not-exist", "", nil); r.Code != http.StatusNotFound {
+		t.Fatalf("delete unknown = %d, want 404", r.Code)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	srv, _ := newTestServer(t, time.Now())
 	rec := httptest.NewRecorder()
