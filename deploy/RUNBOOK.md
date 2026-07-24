@@ -43,14 +43,33 @@ container, then waits for `/healthz`.
 ## Publishing a new **agent** release (auto-update)
 
 The agent release is served from the `fst_agent` volume (`/srv/agent` in the
-container). After signing a build locally (`scripts/release-local.ps1`), copy the
-two files in and the running fleet updates within one ingest cycle (the backend
-hot-reloads `manifest.json` on mtime change — no restart):
+container). After signing a build locally (`scripts/release-local.ps1` produces
+`agentrelease/agent.exe` + `manifest.json`), get the two files onto the box and
+`docker cp` them in; the running fleet updates within one ingest cycle (the
+backend hot-reloads `manifest.json` on mtime change — no restart):
 
 ```sh
 docker cp agent.exe      fabscreentimed:/srv/agent/agent.exe
 docker cp manifest.json  fabscreentimed:/srv/agent/manifest.json
+docker run --rm -v fabscreentime_fst_agent:/a alpine:3.22 chown -R 10001:10001 /a
 ```
+
+**Getting the files onto the box (no SSH there).** Two options:
+
+1. **HTTP pull** — serve `agentrelease/` from the dev box and `wget` from the VM.
+   Watch out: a fresh `go run` file-server is a new binary each time and Windows
+   Firewall may block inbound to it (symptom: `wget` times out from the VM).
+2. **Proxmox guest-agent file-write** (firewall-independent, the reliable path).
+   The API caps `content` at **61440 chars**, so gzip the exe, base64 it, split on
+   4-char boundaries into ≤60000-char parts, `file-write` each with `encode=0`
+   (PVE base64-decodes and writes raw bytes), then on the guest
+   `cat parts/* | gunzip > agent.exe` and verify the sha256 against the manifest
+   **before** `docker cp`.
+
+**The served agent must be the ProgramData-aware build** (`InstallDir` →
+`%ProgramData%`). An older agent that installs to `%LOCALAPPDATA%` will be
+silently blocked by Windows from auto-starting (see the agent notes) — so every
+website "Add device" install would fail. Re-stage after any agent change.
 
 ## Backups (two layers)
 
