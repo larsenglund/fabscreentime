@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS devices (
     enrolled_at         INTEGER,
     enroll_ip           TEXT,               -- true client IP at enrollment (audit)
     revoked             INTEGER NOT NULL DEFAULT 0,
+    log_titles          INTEGER NOT NULL DEFAULT 1, -- 0 = drop window titles on ingest (privacy, §9)
     created_at          INTEGER NOT NULL
 );
 
@@ -129,6 +130,7 @@ func OpenStore(path string) (*Store, error) {
 		`ALTER TABLE devices ADD COLUMN enrolled_at INTEGER`,
 		`ALTER TABLE devices ADD COLUMN enroll_ip TEXT`,
 		`ALTER TABLE devices ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE devices ADD COLUMN log_titles INTEGER NOT NULL DEFAULT 1`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -277,6 +279,24 @@ func (s *Store) SetRevoked(uuid string, revoked bool) error {
 	return err
 }
 
+// DeviceLogTitles reports whether window titles should be stored for a device.
+// A missing row defaults to true (log titles) — the safe default is to keep the
+// data the operator enrolled for; opting out is the explicit action.
+func (s *Store) DeviceLogTitles(id int64) (bool, error) {
+	var v int
+	err := s.db.QueryRow(`SELECT log_titles FROM devices WHERE id = ?`, id).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	return v != 0, err
+}
+
+// SetLogTitles sets a device's title-logging preference by UUID.
+func (s *Store) SetLogTitles(uuid string, on bool) error {
+	_, err := s.db.Exec(`UPDATE devices SET log_titles = ? WHERE device_uuid = ?`, boolToInt(on), uuid)
+	return err
+}
+
 // RenameDevice sets a device's display name by UUID.
 func (s *Store) RenameDevice(uuid, name string) error {
 	_, err := s.db.Exec(`UPDATE devices SET name = ? WHERE device_uuid = ?`, name, uuid)
@@ -284,16 +304,18 @@ func (s *Store) RenameDevice(uuid, name string) error {
 }
 
 const deviceStatusCols = `device_uuid, name, COALESCE(hostname, ''), COALESCE(last_seen, 0),
-	COALESCE(agent_version, ''), api_token_hash IS NOT NULL, revoked, enroll_expires, COALESCE(enrolled_at, 0)`
+	COALESCE(agent_version, ''), api_token_hash IS NOT NULL, revoked, enroll_expires, COALESCE(enrolled_at, 0),
+	log_titles`
 
 func scanDeviceStatus(sc interface{ Scan(...any) error }, now int64) (shared.DeviceStatus, error) {
 	var d shared.DeviceStatus
-	var apiSet, revoked int
+	var apiSet, revoked, logTitles int
 	var enrollExpires sql.NullInt64
 	if err := sc.Scan(&d.DeviceUUID, &d.Name, &d.Hostname, &d.LastSeen,
-		&d.AgentVersion, &apiSet, &revoked, &enrollExpires, &d.EnrolledAt); err != nil {
+		&d.AgentVersion, &apiSet, &revoked, &enrollExpires, &d.EnrolledAt, &logTitles); err != nil {
 		return d, err
 	}
+	d.LogTitles = logTitles != 0
 	switch {
 	case revoked != 0:
 		d.Status = "revoked"
@@ -719,6 +741,92 @@ func (s *Store) DeviceTopApps(uuid, fromDay, toDay string, limit int) ([]AppStat
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// SignalDay is one day's breakdown of the three signals that tell the §0.1
+// story. macro_minutes — input while the monitor is OFF — is the autoclicker
+// fingerprint the whole design hinges on; it should normally be ~0.
+type SignalDay struct {
+	Day            string `json:"day"`
+	MonitorMinutes int    `json:"monitor_minutes"` // monitor on
+	ActiveMinutes  int    `json:"active_minutes"`  // monitor on AND input active (engaged)
+	MacroMinutes   int    `json:"macro_minutes"`   // monitor OFF AND input active (macro fingerprint)
+	SessionMinutes int    `json:"session_minutes"` // any sample present
+}
+
+// DeviceSignals returns the per-day signal breakdown from raw samples for ts in
+// [fromUnix, toUnix). Sparse; the handler zero-fills the day axis.
+func (s *Store) DeviceSignals(uuid string, fromUnix, toUnix int64) ([]SignalDay, error) {
+	id, err := s.deviceIDByUUID(uuid)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+		SELECT strftime('%Y-%m-%d', ts, 'unixepoch') AS day,
+		       SUM(CASE WHEN monitor_on=1 THEN 1 ELSE 0 END),
+		       SUM(CASE WHEN monitor_on=1 AND is_idle=0 THEN 1 ELSE 0 END),
+		       SUM(CASE WHEN monitor_on=0 AND is_idle=0 THEN 1 ELSE 0 END),
+		       COUNT(*)
+		FROM samples WHERE device_id = ? AND ts >= ? AND ts < ?
+		GROUP BY day ORDER BY day`, id, fromUnix, toUnix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SignalDay
+	for rows.Next() {
+		var d SignalDay
+		if err := rows.Scan(&d.Day, &d.MonitorMinutes, &d.ActiveMinutes, &d.MacroMinutes, &d.SessionMinutes); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// HeatDay is one row of the activity heatmap: monitor-on minutes per UTC hour.
+type HeatDay struct {
+	Day   string  `json:"day"`
+	Hours [24]int `json:"hours"`
+}
+
+// DeviceHeatmap returns monitor-on minutes bucketed by (UTC day, hour) for ts in
+// [fromUnix, toUnix), one dense HeatDay per day in range (zero-filled).
+func (s *Store) DeviceHeatmap(uuid string, fromUnix, toUnix int64) ([]HeatDay, error) {
+	id, err := s.deviceIDByUUID(uuid)
+	if err != nil {
+		return nil, err
+	}
+	// Dense day axis first (so days with no activity still appear as a row).
+	byDay := map[string]*HeatDay{}
+	var days []HeatDay
+	for t := fromUnix - (fromUnix % 86400); t < toUnix; t += 86400 {
+		day := time.Unix(t, 0).UTC().Format("2006-01-02")
+		days = append(days, HeatDay{Day: day})
+	}
+	for i := range days {
+		byDay[days[i].Day] = &days[i]
+	}
+
+	rows, err := s.db.Query(`
+		SELECT ts / 86400 AS day_epoch, (ts % 86400) / 3600 AS hour, COUNT(*)
+		FROM samples WHERE device_id = ? AND monitor_on = 1 AND ts >= ? AND ts < ?
+		GROUP BY day_epoch, hour`, id, fromUnix, toUnix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var dayEpoch, hour, n int64
+		if err := rows.Scan(&dayEpoch, &hour, &n); err != nil {
+			return nil, err
+		}
+		day := time.Unix(dayEpoch*86400, 0).UTC().Format("2006-01-02")
+		if hd, ok := byDay[day]; ok && hour >= 0 && hour < 24 {
+			hd.Hours[hour] = int(n)
+		}
+	}
+	return days, rows.Err()
 }
 
 func nullableInt(v int) any {

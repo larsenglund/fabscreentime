@@ -36,12 +36,25 @@ the repo; it's committed on branch `claude/screentime-app-plan-nttogj`.
     overlay, with the honest "presence proxy, not tamper-proof" note. Light/dark themed, responsive.
     Backend endpoints: `/api/stats/trend`, `/api/devices/{uuid}/timeline`, `.../top-apps`.
     Charts are hand-rolled SVG/divs (fully theme-controlled) rather than Recharts.
-  - **Install-from-website (part of Phase 5), first cut** — the dashboard's **Add device** flow:
-    name a machine → mint a one-time secret → download a personalized silent installer (secret in
-    the file body, hash-checked against the manifest) → live "waiting… ✓ connected" poll. Device
-    list shows status + a Revoke action.
-- **Not started / partial:** rest of Phase 5 (signal-comparison view, heatmap, title opt-out UI),
-  Phases 6–8 (Proxmox deploy → availability/observability → polish). See [PLAN.md §10](./PLAN.md).
+  - **Phase 5 — Install-from-website + remaining views**: the dashboard's **Add device** flow
+    (name → mint one-time secret → download a personalized silent installer, secret in the file
+    body, hash-checked against the manifest → live "waiting… ✓ connected" poll); the
+    **signal-comparison** view (monitor-on vs input-active vs *macro* = input-while-screen-off,
+    the §0.1 autoclicker fingerprint, flagged in red); the **activity heatmap** (days × hours,
+    Tailwind divs); and a per-device **title opt-out** (`log_titles`): the dashboard toggle drops
+    window titles **server-side on ingest** so they are never stored. Titles are only ever rendered
+    as React text (auto-escaped) — no `dangerouslySetInnerHTML` — so a hostile window title can't
+    inject script.
+- **Not started:** Phases 6–8 (Proxmox deploy → availability/observability → polish). See
+  [PLAN.md §10](./PLAN.md).
+
+### One Phase 5 nuance deferred
+
+The title opt-out drops titles **at the server** (never stored), which is the privacy guarantee
+that matters. It does **not** yet stop the agent from *sending* titles, so an opted-out device's
+titles still traverse the TLS link (visible to the Cloudflare edge) before being dropped. Closing
+that gap means returning the preference in the ingest response and having the agent suppress titles
+locally — a small, well-scoped follow-up.
 
 ### Things that still need YOU / real hardware
 

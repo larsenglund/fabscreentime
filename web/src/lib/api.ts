@@ -21,6 +21,7 @@ export interface DeviceStatus {
   last_seen: number;
   agent_version: string;
   enrolled_at: number;
+  log_titles: boolean;
 }
 
 export interface TrendPoint {
@@ -38,6 +39,19 @@ export interface HourBucket {
 export interface AppStat {
   exe: string;
   monitor_minutes: number;
+}
+
+export interface SignalDay {
+  day: string;
+  monitor_minutes: number;
+  active_minutes: number;
+  macro_minutes: number;
+  session_minutes: number;
+}
+
+export interface HeatDay {
+  day: string;
+  hours: number[];
 }
 
 export interface PrepareEnrollResponse {
@@ -112,6 +126,22 @@ export function useTopApps(uuid: string, range: string) {
   });
 }
 
+export function useSignals(uuid: string, range: string) {
+  return useQuery({
+    queryKey: ["signals", uuid, range],
+    queryFn: () => getJSON<{ signals: SignalDay[] }>(`/api/devices/${uuid}/signals?range=${range}`),
+    refetchInterval: LIVE,
+  });
+}
+
+export function useHeatmap(uuid: string, days = 14) {
+  return useQuery({
+    queryKey: ["heatmap", uuid, days],
+    queryFn: () => getJSON<{ heatmap: HeatDay[] }>(`/api/devices/${uuid}/heatmap?days=${days}`),
+    refetchInterval: LIVE,
+  });
+}
+
 export function usePrepareEnroll() {
   return useMutation({
     mutationFn: (name: string) =>
@@ -122,11 +152,16 @@ export function usePrepareEnroll() {
 export function usePatchDevice() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { uuid: string; name?: string; revoked?: boolean }) =>
-      sendJSON<DeviceStatus>(`/api/devices/${v.uuid}`, "PATCH", { name: v.name, revoked: v.revoked }),
-    onSuccess: () => {
+    mutationFn: (v: { uuid: string; name?: string; revoked?: boolean; log_titles?: boolean }) =>
+      sendJSON<DeviceStatus>(`/api/devices/${v.uuid}`, "PATCH", {
+        name: v.name,
+        revoked: v.revoked,
+        log_titles: v.log_titles,
+      }),
+    onSuccess: (_data, v) => {
       qc.invalidateQueries({ queryKey: ["devices"] });
       qc.invalidateQueries({ queryKey: ["summary"] });
+      qc.invalidateQueries({ queryKey: ["device", v.uuid] });
     },
   });
 }

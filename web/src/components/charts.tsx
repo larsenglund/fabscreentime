@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import type { AppStat, DeviceSummary, HourBucket, TrendPoint } from "../lib/api";
+import type { AppStat, DeviceSummary, HeatDay, HourBucket, SignalDay, TrendPoint } from "../lib/api";
 import { fmtMinutes } from "../lib/format";
 import { Muted } from "./ui/skeleton";
 
@@ -133,12 +133,99 @@ export function TopApps({ apps }: { apps: AppStat[] }) {
 export function SignalLegend() {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-      <span className="inline-flex items-center gap-1.5">
-        <span className="size-2.5 rounded-sm bg-monitor" /> Monitor-on
-      </span>
-      <span className="inline-flex items-center gap-1.5">
-        <span className="size-2.5 rounded-sm bg-active" /> Input-active
-      </span>
+      <LegendItem className="bg-monitor" label="Monitor-on" />
+      <LegendItem className="bg-active" label="Input-active" />
+    </div>
+  );
+}
+
+function LegendItem({ className, label }: { className: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className={`size-2.5 rounded-sm ${className}`} /> {label}
+    </span>
+  );
+}
+
+/** Heatmap renders days × hours, cell intensity ∝ monitor-on minutes — reads
+ *  like a sleep tracker across the range (Tailwind divs, no chart lib). */
+export function Heatmap({ days }: { days: HeatDay[] }) {
+  const max = Math.max(1, ...days.flatMap((d) => d.hours));
+  if (!days.length) return <Muted>No data in this range yet.</Muted>;
+  return (
+    <div className="overflow-x-auto">
+      <div className="min-w-[520px]">
+        <div className="mb-1 flex gap-[2px] pl-12 text-[10px] text-muted-foreground">
+          {Array.from({ length: 24 }).map((_, h) => (
+            <div key={h} className="flex-1 text-center">
+              {h % 6 === 0 ? h : ""}
+            </div>
+          ))}
+        </div>
+        {days.map((d) => (
+          <div key={d.day} className="mb-[2px] flex items-center gap-[2px]">
+            <div className="w-11 shrink-0 pr-1 text-right text-[10px] text-muted-foreground">
+              {d.day.slice(5)}
+            </div>
+            {d.hours.map((v, h) => (
+              <div
+                key={h}
+                className="aspect-square flex-1 rounded-[2px]"
+                title={`${d.day} ${String(h).padStart(2, "0")}:00 — ${v}m on`}
+                style={{
+                  backgroundColor: v
+                    ? `rgb(var(--monitor) / ${(0.15 + 0.85 * Math.min(1, v / max)).toFixed(3)})`
+                    : "rgb(var(--muted))",
+                }}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** SignalComparison shows monitor-on / input-active / macro per day. macro
+ *  (input while the monitor is off) is the §0.1 autoclicker fingerprint and is
+ *  flagged in red whenever it is nonzero. */
+export function SignalComparison({ days }: { days: SignalDay[] }) {
+  if (!days.some((d) => d.session_minutes > 0)) return <Muted>No samples in this range yet.</Muted>;
+  const max = Math.max(1, ...days.map((d) => Math.max(d.monitor_minutes, d.active_minutes, d.macro_minutes)));
+  const anyMacro = days.some((d) => d.macro_minutes > 0);
+  return (
+    <div>
+      <div className="space-y-2">
+        {days.map((d) => (
+          <div key={d.day} className="flex items-center gap-3">
+            <div className="w-14 shrink-0 text-[11px] text-muted-foreground">{d.day.slice(5)}</div>
+            <div className="flex-1 space-y-[3px]">
+              <CmpBar value={d.monitor_minutes} max={max} className="bg-monitor" />
+              <CmpBar value={d.active_minutes} max={max} className="bg-active" />
+              {d.macro_minutes > 0 && <CmpBar value={d.macro_minutes} max={max} className="bg-danger" />}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+        <LegendItem className="bg-monitor" label="Monitor-on" />
+        <LegendItem className="bg-active" label="Input-active" />
+        <LegendItem className="bg-danger" label="Macro (input, screen off)" />
+      </div>
+      {anyMacro && (
+        <p className="mt-2 text-xs text-danger">
+          Input was recorded while the monitor was off — the unattended/autoclicker fingerprint
+          (§0.1). This time is excluded from screentime.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function CmpBar({ value, max, className }: { value: number; max: number; className: string }) {
+  return (
+    <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+      <div className={`h-full rounded-full ${className}`} style={{ width: `${(value / max) * 100}%` }} />
     </div>
   );
 }

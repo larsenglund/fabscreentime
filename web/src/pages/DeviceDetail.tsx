@@ -1,14 +1,15 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useDevice, useTimeline, useTopApps } from "../lib/api";
+import { useDevice, useHeatmap, usePatchDevice, useSignals, useTimeline, useTopApps } from "../lib/api";
 import { fmtMinutes, ago, todayUTC, shiftDay } from "../lib/format";
 import { Kpi } from "../components/Kpi";
 import { CardSection } from "../components/ui/card";
 import { StatusBadge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import { Switch } from "../components/ui/switch";
 import { Skeleton } from "../components/ui/skeleton";
-import { HourStrip, TopApps, SignalLegend } from "../components/charts";
+import { HourStrip, TopApps, SignalLegend, SignalComparison, Heatmap } from "../components/charts";
 import { RangeSwitcher, type RangeKey } from "../components/RangeSwitcher";
 
 export function DeviceDetail() {
@@ -18,6 +19,9 @@ export function DeviceDetail() {
   const device = useDevice(uuid);
   const timeline = useTimeline(uuid, day);
   const topApps = useTopApps(uuid, range);
+  const signals = useSignals(uuid, "7d");
+  const heatmap = useHeatmap(uuid, 14);
+  const patch = usePatchDevice();
 
   const hours = timeline.data?.hours ?? [];
   const dayMonitor = hours.reduce((s, h) => s + h.monitor_minutes, 0);
@@ -96,6 +100,45 @@ export function DeviceDetail() {
         ) : (
           <TopApps apps={topApps.data?.apps ?? []} />
         )}
+      </CardSection>
+
+      <CardSection
+        title="Signal comparison"
+        action={<span className="text-xs text-muted-foreground">last 7 days</span>}
+      >
+        {signals.isLoading ? (
+          <Skeleton className="h-40 w-full" />
+        ) : (
+          <SignalComparison days={signals.data?.signals ?? []} />
+        )}
+      </CardSection>
+
+      <CardSection
+        title="Activity heatmap"
+        action={<span className="text-xs text-muted-foreground">monitor-on · last 14 days</span>}
+      >
+        {heatmap.isLoading ? (
+          <Skeleton className="h-48 w-full" />
+        ) : (
+          <Heatmap days={heatmap.data?.heatmap ?? []} />
+        )}
+      </CardSection>
+
+      <CardSection title="Privacy">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <div className="text-sm font-medium">Log window titles</div>
+            <div className="mt-0.5 max-w-md text-xs text-muted-foreground">
+              When off, only the app (.exe) and activity are recorded — window titles (which can
+              reveal URLs, documents, and contacts) are dropped server-side before storage.
+            </div>
+          </div>
+          <Switch
+            checked={d?.log_titles ?? true}
+            disabled={!d || patch.isPending}
+            onChange={(v) => patch.mutate({ uuid, log_titles: v })}
+          />
+        </div>
       </CardSection>
     </div>
   );

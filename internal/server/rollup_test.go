@@ -263,3 +263,71 @@ func TestDashboardQueries(t *testing.T) {
 		t.Fatalf("TopApps = %+v, want game.exe=2 first", apps)
 	}
 }
+
+func TestDeviceSignalsAndHeatmap(t *testing.T) {
+	st := openTestStore(t)
+	id, err := st.UpsertDevice("dev-sig", "host", "1.0", dayBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h9 := dayBase + 9*3600
+	// hour 9: 2 engaged (on+active), 1 idle-on; hour 10: 1 MACRO (monitor off + input active).
+	if _, _, err := st.InsertSamples(id, []shared.Sample{
+		{ClientTS: h9 + 60, MonitorOn: 1, IsIdle: false, Exe: "game.exe"},
+		{ClientTS: h9 + 120, MonitorOn: 1, IsIdle: false, Exe: "game.exe"},
+		{ClientTS: h9 + 180, MonitorOn: 1, IsIdle: true, Exe: "game.exe"},
+		{ClientTS: dayBase + 10*3600 + 60, MonitorOn: 0, IsIdle: false, Exe: "game.exe"},
+	}, dayBase+11*3600); err != nil {
+		t.Fatal(err)
+	}
+	day := DayUTC(dayBase)
+
+	sig, err := st.DeviceSignals("dev-sig", dayStartUnix(day), dayBase+86400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sig) != 1 {
+		t.Fatalf("signals days = %d, want 1", len(sig))
+	}
+	s0 := sig[0]
+	if s0.MonitorMinutes != 3 || s0.ActiveMinutes != 2 || s0.MacroMinutes != 1 || s0.SessionMinutes != 4 {
+		t.Fatalf("signal day = %+v, want monitor=3 active=2 macro=1 session=4", s0)
+	}
+
+	hm, err := st.DeviceHeatmap("dev-sig", dayStartUnix(day), dayBase+86400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hm) != 1 {
+		t.Fatalf("heatmap days = %d, want 1", len(hm))
+	}
+	if hm[0].Hours[9] != 3 || hm[0].Hours[10] != 0 {
+		t.Fatalf("heatmap hours 9/10 = %d/%d, want 3/0 (hour 10 was monitor-off)", hm[0].Hours[9], hm[0].Hours[10])
+	}
+}
+
+func TestLogTitlesOptOut(t *testing.T) {
+	st := openTestStore(t)
+	id, err := st.UpsertDevice("dev-priv", "host", "1.0", dayBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Default: titles are logged.
+	if on, _ := st.DeviceLogTitles(id); !on {
+		t.Fatal("log_titles should default to true")
+	}
+	if err := st.SetLogTitles("dev-priv", false); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := st.DeviceLogTitles(id); on {
+		t.Fatal("log_titles should be false after opt-out")
+	}
+	// Status reflects the preference.
+	d, err := st.DeviceStatusByUUID("dev-priv", dayBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.LogTitles {
+		t.Fatal("DeviceStatus.LogTitles should be false")
+	}
+}

@@ -206,6 +206,40 @@ func TestEnrollPollReportsStatus(t *testing.T) {
 	}
 }
 
+func TestTitleOptOutStripsOnIngest(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	srv, st := newTestServer(t, now)
+	h := srv.Handler()
+	uuid, token := enrollDevice(t, h, "PC")
+
+	// Opt out of window titles via the dashboard.
+	no := false
+	rec := doJSON(t, h, http.MethodPatch, "/api/devices/"+uuid, "", shared.PatchDeviceRequest{LogTitles: &no})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch log_titles = %d, want 200", rec.Code)
+	}
+
+	// Ingest a sample carrying a sensitive title.
+	doIngest(t, h, token, shared.IngestRequest{
+		Samples: []shared.Sample{{ClientTS: now.Unix(), MonitorOn: 1, Exe: "chrome.exe", Title: "Online banking — Acme Bank"}},
+	})
+
+	// The stored title must be empty (dropped server-side), exe kept.
+	var title, exe string
+	err := st.db.QueryRow(`
+		SELECT COALESCE(window_title,''), COALESCE(exe_name,'')
+		FROM samples s JOIN devices d ON d.id = s.device_id WHERE d.device_uuid = ?`, uuid).Scan(&title, &exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if title != "" {
+		t.Fatalf("title = %q, want empty (opted out)", title)
+	}
+	if exe != "chrome.exe" {
+		t.Fatalf("exe = %q, want chrome.exe (kept)", exe)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	srv, _ := newTestServer(t, time.Now())
 	rec := httptest.NewRecorder()

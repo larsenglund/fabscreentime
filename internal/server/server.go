@@ -129,6 +129,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/devices/{uuid}", s.handleDevicePatch)
 	mux.HandleFunc("GET /api/devices/{uuid}/timeline", s.handleTimeline)
 	mux.HandleFunc("GET /api/devices/{uuid}/top-apps", s.handleTopApps)
+	mux.HandleFunc("GET /api/devices/{uuid}/signals", s.handleSignals)
+	mux.HandleFunc("GET /api/devices/{uuid}/heatmap", s.handleHeatmap)
 	// Infra.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// Everything else is the embedded SPA (static assets + client-side routes).
@@ -160,6 +162,13 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		log.Printf("touch device: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
+	}
+	// Privacy opt-out (§9): drop window titles server-side for devices with
+	// log_titles=0, so they are never stored regardless of what the agent sends.
+	if keep, err := s.store.DeviceLogTitles(id); err == nil && !keep {
+		for i := range req.Samples {
+			req.Samples[i].Title = ""
+		}
 	}
 	accepted, sampleDays, err := s.store.InsertSamples(id, req.Samples, now)
 	if err != nil {
@@ -365,6 +374,13 @@ func (s *Server) handleDevicePatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.LogTitles != nil {
+		if err := s.store.SetLogTitles(uuid, *req.LogTitles); err != nil {
+			log.Printf("set log_titles: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+	}
 	d, err := s.store.DeviceStatusByUUID(uuid, s.now().Unix())
 	if err != nil {
 		http.Error(w, "server error", http.StatusInternalServerError)
@@ -482,6 +498,75 @@ func (s *Server) handleTopApps(w http.ResponseWriter, r *http.Request) {
 		apps = []AppStat{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"apps": apps})
+}
+
+// handleSignals returns the per-day monitor-on / input-active / macro breakdown
+// over the range (zero-filled), the data behind the signal-comparison view.
+func (s *Server) handleSignals(w http.ResponseWriter, r *http.Request) {
+	until := s.now()
+	since := until.Add(-parseRange(r.URL.Query().Get("range")))
+	fromDay := DayUTC(since.Unix())
+	toDay := DayUTC(until.Unix())
+
+	sig, err := s.store.DeviceSignals(r.PathValue("uuid"), dayStartUnix(fromDay), until.Unix())
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("signals: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	byDay := make(map[string]SignalDay, len(sig))
+	for _, p := range sig {
+		byDay[p.Day] = p
+	}
+	dense := []SignalDay{}
+	start, _ := time.Parse("2006-01-02", fromDay)
+	end, _ := time.Parse("2006-01-02", toDay)
+	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+		day := d.Format("2006-01-02")
+		if p, ok := byDay[day]; ok {
+			dense = append(dense, p)
+		} else {
+			dense = append(dense, SignalDay{Day: day})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"signals": dense})
+}
+
+// handleHeatmap returns monitor-on minutes per (day, hour) for the last N days.
+func (s *Server) handleHeatmap(w http.ResponseWriter, r *http.Request) {
+	days := 14
+	if n, err := strconv.Atoi(r.URL.Query().Get("days")); err == nil && n > 0 {
+		if n > 35 {
+			n = 35
+		}
+		days = n
+	}
+	until := s.now()
+	startDay := DayUTC(until.Add(-time.Duration(days-1) * 24 * time.Hour).Unix())
+	hm, err := s.store.DeviceHeatmap(r.PathValue("uuid"), dayStartUnix(startDay), until.Unix())
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("heatmap: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"heatmap": hm})
+}
+
+// dayStartUnix returns the UTC-midnight unix seconds for a YYYY-MM-DD string.
+func dayStartUnix(day string) int64 {
+	t, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		return 0
+	}
+	return t.Unix()
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

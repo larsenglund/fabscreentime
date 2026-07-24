@@ -128,10 +128,12 @@ type DeviceStatus struct {
 	LastSeen     int64  `json:"last_seen"`
 	AgentVersion string `json:"agent_version"`
 	EnrolledAt   int64  `json:"enrolled_at"`
+	LogTitles    bool   `json:"log_titles"` // false = window titles are dropped (privacy opt-out, §9)
 }
 
-// PatchDeviceRequest updates a device from the dashboard (rename / revoke).
+// PatchDeviceRequest updates a device from the dashboard (rename / revoke / title opt-out).
 type PatchDeviceRequest struct {
-	Name    *string `json:"name,omitempty"`
-	Revoked *bool   `json:"revoked,omitempty"`
+	Name      *string `json:"name,omitempty"`
+	Revoked   *bool   `json:"revoked,omitempty"`
+	LogTitles *bool   `json:"log_titles,omitempty"`
 }
