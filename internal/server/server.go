@@ -2,12 +2,15 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +18,7 @@ import (
 	"time"
 
 	"github.com/larsenglund/fabscreentime/internal/shared"
+	"github.com/larsenglund/fabscreentime/web"
 )
 
 const (
@@ -36,6 +40,9 @@ type Server struct {
 
 	enrollLimiter *rateLimiter // per-IP cap on the public enrollment endpoint
 
+	distFS fs.FS        // embedded SPA build (may be nil if the embed failed)
+	spa    http.Handler // static file server over distFS
+
 	mu          sync.Mutex
 	dirty       map[dirtyKey]bool      // (device, day) pairs whose rollup is stale
 	manifest    *shared.SignedManifest // current signed release (hot-reloaded on mtime change)
@@ -54,6 +61,12 @@ func New(store *Store, agentDir string) *Server {
 	}
 	if m := s.currentManifest(); m != nil {
 		log.Printf("serving agent release %s (build %d)", m.Manifest.Version, m.Manifest.Build)
+	}
+	if dfs, err := web.DistFS(); err != nil {
+		log.Printf("embedded dashboard unavailable: %v", err)
+	} else {
+		s.distFS = dfs
+		s.spa = http.FileServerFS(dfs)
 	}
 	return s
 }
@@ -110,12 +123,16 @@ func (s *Server) Handler() http.Handler {
 	// Dashboard plane (Cloudflare Access in prod).
 	mux.HandleFunc("POST /api/enroll/prepare", s.handlePrepareEnroll)
 	mux.HandleFunc("GET /api/dashboard/summary", s.handleSummary)
+	mux.HandleFunc("GET /api/stats/trend", s.handleTrend)
 	mux.HandleFunc("GET /api/devices", s.handleDevices)
 	mux.HandleFunc("GET /api/devices/{uuid}", s.handleDevice)
 	mux.HandleFunc("PATCH /api/devices/{uuid}", s.handleDevicePatch)
+	mux.HandleFunc("GET /api/devices/{uuid}/timeline", s.handleTimeline)
+	mux.HandleFunc("GET /api/devices/{uuid}/top-apps", s.handleTopApps)
 	// Infra.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.HandleFunc("GET /", s.handleIndex)
+	// Everything else is the embedded SPA (static assets + client-side routes).
+	mux.HandleFunc("GET /", s.handleSPA)
 	return logRequests(mux)
 }
 
@@ -386,19 +403,110 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleTrend returns household daily totals over the range, zero-filled so the
+// chart axis is continuous.
+func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
+	until := s.now()
+	since := until.Add(-parseRange(r.URL.Query().Get("range")))
+	from := DayUTC(since.Unix())
+	to := DayUTC(until.Unix())
+
+	pts, err := s.store.Trend(from, to)
+	if err != nil {
+		log.Printf("trend: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	byDay := make(map[string]TrendPoint, len(pts))
+	for _, p := range pts {
+		byDay[p.Day] = p
+	}
+	start, _ := time.Parse("2006-01-02", from)
+	end, _ := time.Parse("2006-01-02", to)
+	dense := []TrendPoint{}
+	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+		day := d.Format("2006-01-02")
+		if p, ok := byDay[day]; ok {
+			dense = append(dense, p)
+		} else {
+			dense = append(dense, TrendPoint{Day: day})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"trend": dense})
+}
+
+func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
+	day := strings.TrimSpace(r.URL.Query().Get("day"))
+	if day == "" {
+		day = DayUTC(s.now().Unix())
+	}
+	t, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		http.Error(w, "bad day (want YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+	hours, err := s.store.DeviceTimeline(r.PathValue("uuid"), t.UTC().Unix())
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("timeline: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"day": day, "hours": hours})
+}
+
+func (s *Server) handleTopApps(w http.ResponseWriter, r *http.Request) {
+	until := s.now()
+	since := until.Add(-parseRange(r.URL.Query().Get("range")))
+	limit := 10
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		if n > 50 {
+			n = 50
+		}
+		limit = n
+	}
+	apps, err := s.store.DeviceTopApps(r.PathValue("uuid"), DayUTC(since.Unix()), DayUTC(until.Unix()), limit)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("top-apps: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if apps == nil {
+		apps = []AppStat{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"apps": apps})
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }
 
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
+// handleSPA serves the embedded single-page app: real files (JS/CSS/assets) are
+// served directly; any other path falls back to index.html so client-side routes
+// like /devices/{uuid} resolve on a fresh load or refresh.
+func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
+	if s.spa == nil {
+		http.Error(w, "dashboard not built (run scripts/build-ui.ps1)", http.StatusServiceUnavailable)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(indexHTML))
+	name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+	if name == "" {
+		name = "index.html"
+	}
+	if _, err := fs.Stat(s.distFS, name); err != nil {
+		r = r.Clone(r.Context()) // unknown path → SPA route → serve index.html
+		r.URL.Path = "/"
+	}
+	s.spa.ServeHTTP(w, r)
 }
 
 // parseRange turns "7d"/"24h"/"30d" into a duration, defaulting to 7 days.

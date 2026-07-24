@@ -611,6 +611,116 @@ func (s *Store) Summary(since, until int64) ([]DeviceSummary, error) {
 	return out, rows.Err()
 }
 
+// deviceIDByUUID resolves a device UUID to its row id (sql.ErrNoRows if unknown).
+func (s *Store) deviceIDByUUID(uuid string) (int64, error) {
+	var id int64
+	err := s.db.QueryRow(`SELECT id FROM devices WHERE device_uuid = ?`, uuid).Scan(&id)
+	return id, err
+}
+
+// TrendPoint is one day of household-wide totals (summed across devices).
+type TrendPoint struct {
+	Day            string `json:"day"`
+	MonitorMinutes int    `json:"monitor_minutes"`
+	ActiveMinutes  int    `json:"active_minutes"`
+}
+
+// Trend returns household daily totals for days in [fromDay, toDay] (inclusive),
+// from the permanent rollups. Sparse — only days with data are returned; the
+// handler zero-fills the rest so the chart has a continuous axis.
+func (s *Store) Trend(fromDay, toDay string) ([]TrendPoint, error) {
+	rows, err := s.db.Query(`
+		SELECT day, COALESCE(SUM(monitor_minutes),0), COALESCE(SUM(active_minutes),0)
+		FROM daily_stats WHERE day >= ? AND day <= ?
+		GROUP BY day ORDER BY day`, fromDay, toDay)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TrendPoint
+	for rows.Next() {
+		var p TrendPoint
+		if err := rows.Scan(&p.Day, &p.MonitorMinutes, &p.ActiveMinutes); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// HourBucket is one hour of a device's day (monitor-on vs input-active minutes).
+type HourBucket struct {
+	Hour           int `json:"hour"`
+	MonitorMinutes int `json:"monitor_minutes"`
+	ActiveMinutes  int `json:"active_minutes"`
+}
+
+// DeviceTimeline returns 24 zero-filled hourly buckets for the UTC day starting
+// at dayStart, computed from raw samples (works without a rollup having run).
+func (s *Store) DeviceTimeline(uuid string, dayStart int64) ([]HourBucket, error) {
+	buckets := make([]HourBucket, 24)
+	for h := range buckets {
+		buckets[h].Hour = h
+	}
+	id, err := s.deviceIDByUUID(uuid)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+		SELECT (ts - ?) / 3600 AS hour,
+		       SUM(CASE WHEN monitor_on=1 THEN 1 ELSE 0 END),
+		       SUM(CASE WHEN monitor_on=1 AND is_idle=0 THEN 1 ELSE 0 END)
+		FROM samples WHERE device_id = ? AND ts >= ? AND ts < ?
+		GROUP BY hour`, dayStart, id, dayStart, dayStart+86400)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var h, mon, act int
+		if err := rows.Scan(&h, &mon, &act); err != nil {
+			return nil, err
+		}
+		if h >= 0 && h < 24 {
+			buckets[h].MonitorMinutes = mon
+			buckets[h].ActiveMinutes = act
+		}
+	}
+	return buckets, rows.Err()
+}
+
+// AppStat is one foreground app's monitor-on minutes over a range.
+type AppStat struct {
+	Exe            string `json:"exe"`
+	MonitorMinutes int    `json:"monitor_minutes"`
+}
+
+// DeviceTopApps returns a device's top foreground apps by monitor-on minutes for
+// days in [fromDay, toDay], from the permanent per-app rollup.
+func (s *Store) DeviceTopApps(uuid, fromDay, toDay string, limit int) ([]AppStat, error) {
+	id, err := s.deviceIDByUUID(uuid)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+		SELECT COALESCE(NULLIF(exe_name,''),'(unknown)') AS exe, SUM(monitor_minutes) AS mins
+		FROM daily_app_stats WHERE device_id = ? AND day >= ? AND day <= ?
+		GROUP BY exe ORDER BY mins DESC LIMIT ?`, id, fromDay, toDay, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AppStat
+	for rows.Next() {
+		var a AppStat
+		if err := rows.Scan(&a.Exe, &a.MonitorMinutes); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func nullableInt(v int) any {
 	if v < 0 {
 		return nil

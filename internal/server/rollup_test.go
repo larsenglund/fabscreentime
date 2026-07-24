@@ -209,3 +209,57 @@ func TestInsertSamplesStoresRawDDCPower(t *testing.T) {
 		}
 	}
 }
+
+func TestDashboardQueries(t *testing.T) {
+	st := openTestStore(t)
+	id, err := st.UpsertDevice("dev-dash", "host", "1.0", dayBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h9 := dayBase + 9*3600
+	if _, _, err := st.InsertSamples(id, []shared.Sample{
+		{ClientTS: h9 + 60, MonitorOn: 1, IsIdle: false, Exe: "game.exe"},
+		{ClientTS: h9 + 120, MonitorOn: 1, IsIdle: false, Exe: "game.exe"},
+		{ClientTS: h9 + 180, MonitorOn: 1, IsIdle: true, Exe: "chrome.exe"},
+		{ClientTS: dayBase + 10*3600 + 60, MonitorOn: 0, IsIdle: true, Exe: "chrome.exe"},
+	}, dayBase+11*3600); err != nil {
+		t.Fatal(err)
+	}
+	day := DayUTC(dayBase)
+	if err := st.RollupDay(id, day, dayBase+86400); err != nil {
+		t.Fatal(err)
+	}
+
+	// Trend: household daily totals (sample approximation: 3 monitor-on, 2 active).
+	tr, err := st.Trend(day, day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tr) != 1 || tr[0].MonitorMinutes != 3 || tr[0].ActiveMinutes != 2 {
+		t.Fatalf("Trend = %+v, want one day 3/2", tr)
+	}
+
+	// Timeline: 24 buckets from raw samples; hour 9 has 3 on / 2 active.
+	hrs, err := st.DeviceTimeline("dev-dash", dayBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hrs) != 24 {
+		t.Fatalf("timeline buckets = %d, want 24", len(hrs))
+	}
+	if hrs[9].MonitorMinutes != 3 || hrs[9].ActiveMinutes != 2 {
+		t.Fatalf("hour 9 = %+v, want 3/2", hrs[9])
+	}
+	if hrs[10].MonitorMinutes != 0 {
+		t.Fatalf("hour 10 monitor = %d, want 0 (sample was monitor-off)", hrs[10].MonitorMinutes)
+	}
+
+	// Top apps: game.exe=2, chrome.exe=1 (only monitor-on samples counted).
+	apps, err := st.DeviceTopApps("dev-dash", day, day, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 2 || apps[0].Exe != "game.exe" || apps[0].MonitorMinutes != 2 {
+		t.Fatalf("TopApps = %+v, want game.exe=2 first", apps)
+	}
+}

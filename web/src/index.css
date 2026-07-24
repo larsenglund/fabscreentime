@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+/* Class-based dark mode: `dark:` utilities respond to a .dark ancestor, toggled
+   on <html> by the theme switch (and pre-applied in index.html to avoid a flash). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Semantic palette as raw RGB channels, swapped for light/dark. "Trimmed modern":
+   a neutral zinc base, indigo primary, emerald for the load-bearing monitor-on
+   series, a fainter sky for the secondary input-active layer. */
+:root {
+  --background: 250 250 251;
+  --foreground: 24 24 27;
+  --card: 255 255 255;
+  --muted: 244 244 245;
+  --muted-foreground: 113 113 122;
+  --border: 228 228 231;
+  --primary: 79 70 229;
+  --primary-foreground: 255 255 255;
+  --monitor: 16 185 129;
+  --active: 14 165 233;
+  --warn: 217 119 6;
+  --danger: 220 38 38;
+}
+
+.dark {
+  --background: 9 9 11;
+  --foreground: 244 244 245;
+  --card: 24 24 27;
+  --muted: 39 39 42;
+  --muted-foreground: 161 161 170;
+  --border: 39 39 42;
+  --primary: 129 140 248;
+  --primary-foreground: 9 9 11;
+  --monitor: 52 211 153;
+  --active: 56 189 248;
+  --warn: 251 191 36;
+  --danger: 248 113 113;
+}
+
+/* Map the channels into Tailwind's color namespace; `inline` keeps the var
+   reference live so utilities follow the theme swap. */
+@theme inline {
+  --color-background: rgb(var(--background));
+  --color-foreground: rgb(var(--foreground));
+  --color-card: rgb(var(--card));
+  --color-muted: rgb(var(--muted));
+  --color-muted-foreground: rgb(var(--muted-foreground));
+  --color-border: rgb(var(--border));
+  --color-primary: rgb(var(--primary));
+  --color-primary-foreground: rgb(var(--primary-foreground));
+  --color-monitor: rgb(var(--monitor));
+  --color-active: rgb(var(--active));
+  --color-warn: rgb(var(--warn));
+  --color-danger: rgb(var(--danger));
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@layer base {
+  * {
+    border-color: rgb(var(--border));
+  }
+  html {
+    color-scheme: light dark;
+  }
+  body {
+    margin: 0;
+    background-color: rgb(var(--background));
+    color: rgb(var(--foreground));
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}

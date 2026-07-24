@@ -1,0 +1,134 @@
+import { useState } from "react";
+import { Link } from "react-router-dom";
+import { ChevronRight } from "lucide-react";
+import { useDevices, usePatchDevice, useSummary, useTrend, type DeviceSummary } from "../lib/api";
+import { fmtMinutes, ago, online } from "../lib/format";
+import { RangeSwitcher, type RangeKey } from "../components/RangeSwitcher";
+import { Kpi } from "../components/Kpi";
+import { CardSection } from "../components/ui/card";
+import { StatusBadge } from "../components/ui/badge";
+import { Button } from "../components/ui/button";
+import { Skeleton, Muted } from "../components/ui/skeleton";
+import { DeviceBars, TrendArea, SignalLegend } from "../components/charts";
+
+const rangeDays: Record<string, number> = { "24h": 1, "7d": 7, "30d": 30 };
+
+export function Overview() {
+  const [range, setRange] = useState<RangeKey>("7d");
+  const summary = useSummary(range);
+  const trend = useTrend(range);
+  const devices = useDevices();
+  const patch = usePatchDevice();
+
+  const devs = summary.data?.devices ?? [];
+  const totalMonitor = devs.reduce((s, d) => s + d.monitor_minutes, 0);
+  const reporting = devs.filter((d) => d.sample_count > 0).length;
+  const onlineNow = (devices.data?.devices ?? []).filter((d) => online(d.last_seen)).length;
+  const days = rangeDays[range] ?? 7;
+
+  const metricByUuid = new Map(devs.map((d) => [d.device_uuid, d]));
+
+  function revoke(uuid: string) {
+    if (!confirm("Revoke this device? Its agent can no longer upload until re-enrolled.")) return;
+    patch.mutate({ uuid, revoked: true });
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold tracking-tight">Overview</h1>
+        <RangeSwitcher value={range} onChange={setRange} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Kpi
+          label={`Screentime · ${range === "24h" ? "today" : `last ${days}d`}`}
+          value={summary.isLoading ? <Skeleton className="h-7 w-20" /> : fmtMinutes(totalMonitor)}
+          sub="monitor-on, all devices"
+        />
+        <Kpi
+          label="Daily average"
+          value={summary.isLoading ? <Skeleton className="h-7 w-20" /> : fmtMinutes(totalMonitor / days)}
+          sub="per day in range"
+        />
+        <Kpi label="Devices reporting" value={reporting} sub={`of ${devs.length} enrolled`} />
+        <Kpi label="Online now" value={onlineNow} sub="reported < 3 min ago" />
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-5">
+        <CardSection
+          title="Screentime by device"
+          action={<SignalLegend />}
+          className="lg:col-span-3"
+        >
+          {summary.isLoading ? <Skeleton className="h-40 w-full" /> : <DeviceBars devices={devs} />}
+        </CardSection>
+
+        <CardSection title="Daily trend" className="lg:col-span-2">
+          {trend.isLoading ? (
+            <Skeleton className="h-32 w-full" />
+          ) : (
+            <TrendArea points={trend.data?.trend ?? []} />
+          )}
+        </CardSection>
+      </div>
+
+      <CardSection title="Devices" bodyClassName="p-0 sm:p-0">
+        {devices.isLoading ? (
+          <div className="p-5">
+            <Skeleton className="h-24 w-full" />
+          </div>
+        ) : !devices.data?.devices.length ? (
+          <Muted>No devices yet. Click “Add device” to enroll one.</Muted>
+        ) : (
+          <DeviceTable
+            devices={devices.data.devices.map((d) => ({ status: d, metric: metricByUuid.get(d.device_uuid) }))}
+            onRevoke={revoke}
+          />
+        )}
+      </CardSection>
+    </div>
+  );
+}
+
+function DeviceTable({
+  devices,
+  onRevoke,
+}: {
+  devices: { status: import("../lib/api").DeviceStatus; metric?: DeviceSummary }[];
+  onRevoke: (uuid: string) => void;
+}) {
+  return (
+    <div className="divide-y">
+      {devices.map(({ status, metric }) => (
+        <div key={status.device_uuid} className="flex items-center gap-3 px-4 py-3 sm:px-5">
+          <div className="min-w-0 flex-1">
+            <Link to={`/devices/${status.device_uuid}`} className="flex items-center gap-2">
+              <span className="truncate font-medium hover:text-primary hover:underline">
+                {status.name || status.hostname || status.device_uuid.slice(0, 8)}
+              </span>
+              <StatusBadge device={status} />
+            </Link>
+            <div className="mt-0.5 truncate text-xs text-muted-foreground">
+              {status.agent_version ? `agent ${status.agent_version} · ` : ""}
+              {ago(status.last_seen)}
+            </div>
+          </div>
+          <div className="tnum hidden text-right text-sm sm:block">
+            {fmtMinutes(metric?.monitor_minutes ?? 0)}
+          </div>
+          {status.status === "revoked" ? (
+            <span className="w-16 text-right text-xs text-muted-foreground">revoked</span>
+          ) : (
+            <Button variant="danger" size="sm" onClick={() => onRevoke(status.device_uuid)}>
+              Revoke
+            </Button>
+          )}
+          <Link to={`/devices/${status.device_uuid}`} className="text-muted-foreground hover:text-foreground">
+            <ChevronRight className="size-4" />
+          </Link>
+        </div>
+      ))}
+    </div>
+  );
+}

@@ -29,11 +29,18 @@ the repo; it's committed on branch `claude/screentime-app-plan-nttogj`.
     single-use, 15-min TTL, IP rate-limited), durable per-device bearer tokens (hashed at rest;
     ingest is 401 without a valid one), revocation, DPAPI-encrypted token on the client. Full
     server + agent + credential tests.
-  - **Install-from-website (part of Phase 5), first cut** — the placeholder dashboard has a
-    working **Add device** flow: name a machine → mint a one-time secret → download a personalized
-    silent installer (secret in the file body, hash-checked against the manifest) → live
-    "waiting… ✓ connected" poll. Device list shows status + a Revoke action.
-- **Not started / partial:** Phase 4 (React dashboard — still the placeholder), rest of Phase 5,
+  - **Phase 4 — Dashboard MVP** (React 19 + Vite + TypeScript + Tailwind v4, embedded via
+    `go:embed`, TanStack Query + react-router): Overview (KPI row, per-device bars, daily trend,
+    device list with revoke) and a per-device drilldown (24h monitor-on/input-active timeline,
+    top apps, day picker). Monitor-on is the solid primary series, input-active the lighter
+    overlay, with the honest "presence proxy, not tamper-proof" note. Light/dark themed, responsive.
+    Backend endpoints: `/api/stats/trend`, `/api/devices/{uuid}/timeline`, `.../top-apps`.
+    Charts are hand-rolled SVG/divs (fully theme-controlled) rather than Recharts.
+  - **Install-from-website (part of Phase 5), first cut** — the dashboard's **Add device** flow:
+    name a machine → mint a one-time secret → download a personalized silent installer (secret in
+    the file body, hash-checked against the manifest) → live "waiting… ✓ connected" poll. Device
+    list shows status + a Revoke action.
+- **Not started / partial:** rest of Phase 5 (signal-comparison view, heatmap, title opt-out UI),
   Phases 6–8 (Proxmox deploy → availability/observability → polish). See [PLAN.md §10](./PLAN.md).
 
 ### Things that still need YOU / real hardware
@@ -57,8 +64,12 @@ the connected-monitor count. Adding the pump is a good local task (see section 9
 - **Git** — https://git-scm.com/download/win (includes Git Bash, handy for the `scripts/*.sh`).
 - **Go** — install the latest from https://go.dev/dl/ (the module pins `go 1.25.0`; recent Go
   toolchains fetch the matching version automatically). Verify: `go version`.
+- **Node 20+** — only needed to **rebuild the dashboard** (`web/`). On Lars's machine it lives at
+  `%LOCALAPPDATA%\Programs\nodejs22` (the system PATH may still point at an older Node);
+  `scripts/build-ui.ps1` finds it automatically. The built `web/dist` is committed and embedded,
+  so building the **backend** never needs Node — `go build ./...` works with the Go toolchain alone.
 - **VS Code** (optional) with the Go extension.
-- No C compiler needed — every dependency is pure Go (`modernc.org/sqlite`, `golang.org/x/sys`).
+- No C compiler needed — every Go dependency is pure Go (`modernc.org/sqlite`, `golang.org/x/sys`).
 
 ---
 
@@ -293,6 +304,11 @@ go run .\cmd\agent -server http://localhost:8080 -interval 5s -datadir .\agentda
 
 # Ship a new client build; running agents self-update within one ingest cycle:
 powershell -ExecutionPolicy Bypass -File .\scripts\release-local.ps1 -Version 0.3.0
+
+# Dashboard (web/): rebuild the committed, embedded SPA after editing web/src, then
+# rebuild the backend to embed it. For live UI dev, `npm run dev` proxies to :8080.
+powershell -ExecutionPolicy Bypass -File .\scripts\build-ui.ps1
+cd web ; & "$env:LOCALAPPDATA\Programs\nodejs22\npm.cmd" run dev   # http://localhost:5173
 
 go build -o montest.exe .\cmd\montest ; .\montest.exe   # monitor probe
 ```

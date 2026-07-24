@@ -4,6 +4,12 @@
 /agentrelease/
 *.exe
 
+# Frontend: node_modules is not committed, but web/dist IS (it is embedded into
+# the backend binary by web/embed.go, so `go build` and CI need it present).
+/web/node_modules/
+/web/*.tsbuildinfo
+.vite/
+
 # Local runtime state
 *.db
 *.db-wal
