@@ -93,6 +93,11 @@ scripts/build.sh            builds backend + silent agent.exe + montest.exe + fs
 
 ## 5. ⭐ FIRST TASK — validate the monitor signal (`montest`)
 
+> **Status: results so far live in [MONTEST-RESULTS.md](./MONTEST-RESULTS.md).** Machine 1
+> (DP, Philips signage display) is validated: connection mode is dead there — physical
+> power-off never leaves the topology; the working signal is dxva2 physical-monitor-handle
+> presence (the probe's `ddc_power` column). The HDMI machine is still pending.
+
 This is the one experiment the whole metric design hinges on (PLAN.md §0.1). Your fleet is a
 DisplayPort/HDMI mix, so run it on **one DP machine and one HDMI machine**.
 
