@@ -8,51 +8,55 @@ Probe columns: `monitors_active` (`SM_CMONITORS`), `qdc_paths` + `target_availab
 (`QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS)`), `ddc_power` (dxva2: physical-monitor
 handle + DDC/CI VCP `0xD6`), `idle_ms` (marks the hands-off window).
 
-## Machine 1 — Lars's PC · NVIDIA GTX 1060 6GB (driver 32.0.15.8228, 2026-01) · DisplayPort (validated 2026-07-24)
+## Machine 1 — Lars's PC · NVIDIA GTX 1060 6GB (driver 32.0.15.8228, 2026-01) · three rounds, two panels, both connectors (validated 2026-07-24)
 
-Tested with **two different DP panels** on the same PC, physical power-button rounds each:
+Physical power-button rounds, each with a hands-off window cleanly bracketed by the
+idle ramp and the `ddc_power` transitions:
 
-**Round A — Philips 43BDL4650D (signage).** Clean ~4-minute off window (18:48:27–18:52:35),
-unambiguously bracketed by the idle ramp and the DDC transitions.
+| Round | Panel · connector | Topology while OFF (mon/qdc/avail) | `ddc_power` while ON | `ddc_power` while OFF |
+|---|---|---|---|---|
+| A | Philips 43BDL4650D (signage) · DP | frozen `1/1/1` (~4 min) | `-2` chronic, rare `1` | `-1` all 248 s |
+| B | Dell U2515H (consumer) · DP | frozen `1/1/1` (~35 s) | `1` | `-1` (single ~2 s `-2` at power-down) |
+| C | Dell U2515H (consumer) · HDMI | frozen `1/1/1` (~83 s) | `1` | **`5`** — handle stays, VCP answers "power off" |
 
-**Round B — Dell U2515H (traditional consumer monitor).** ~35 s off window
-(18:59:37–19:00:12), same shape.
+**Finding 1 — connection/topology signals are dead on this PC, all three rounds.** Even
+a consumer Dell DP panel never leaves the topology on physical power-off (suspects:
+NVIDIA monitor/EDID persistence for the Dell; signage wake-on-signal standby for the
+Philips). The §0.1 "DP drops out on power-off" assumption is empirically false here. A
+different-GPU PC would be needed to attribute panel vs driver — but that attribution is
+moot for the design, because the dxva2 signal works regardless.
 
-| Signal | While physically OFF | Verdict |
-|---|---|---|
-| `monitors_active` (SM_CMONITORS) | stayed `1` — both panels | dead |
-| `qdc_paths` (QDC active paths) | stayed `1` — both panels | dead |
-| `target_available` / `statusFlags` | stayed `1` / `0x1` — both panels | dead |
-| DDC/CI VCP `0xD6` value | Philips: answers ~2% of polls even when ON (chronic `-2`); Dell: clean `1` when on | works on Dell, too flaky on Philips |
-| **dxva2 physical-monitor handle presence** | handle **absent (`-1`) for every off-sample on both panels** (Philips: 248/248 s; Dell: full window after a single ~2 s transitional `-2`); present for every on-sample; flips within seconds of the button in both directions | **works — perfect discriminator on both panels** |
+**Finding 2 — the dxva2 probe caught every off-window, but the off-signature differs by
+connector on the same panel:** over DP the physical-monitor handle disappears (`-1`);
+over HDMI the handle stays alive (HDMI +5V keeps the DDC responder powered) and the VCP
+`0xD6` reply flips to `5` ("power off"). Detection latency was seconds in both
+directions at the probe's 2 s DDC cadence.
 
-**The §0.1 "DP drops out of the topology" assumption is empirically false on this PC —
-even for a consumer Dell DP panel.** For the Philips the likely cause is signage standby
-keeping HPD asserted (wake-on-signal). For the Dell the suspect list includes the NVIDIA
-driver's monitor/EDID persistence; whether it's the GPU or the panels can only be
-separated by testing on a different PC (the HDMI machine will provide that datapoint).
-Either way, connection mode cannot be the primary here.
+**The combined per-sample rule that holds for all three rounds:**
 
-**The uniform per-sample rule that held for both panels:**
-`ddc_power != -1` (physical-monitor handle present) ⇒ screen ON;
-`ddc_power == -1` (handle absent) ⇒ screen OFF.
-The `-2` state (handle present, VCP query failed) must count as **on** — it is the
-Philips' chronic on-state and only a ~2 s power-down transition on the Dell. The VCP
-value is a bonus signal when it answers (Dell), never the primary.
+```
+screen ON  ⟺ ddc_power == 1  (VCP says on)   OR  ddc_power == -2 (handle present, query failed)
+screen OFF ⟺ ddc_power == -1 (no handle)     OR  ddc_power in 2..5 (VCP says standby/off)
+```
 
-**Decision:** `monitor_detect_mode = ddc` for this device, implemented as
-**`GetPhysicalMonitorsFromHMONITOR` handle presence** per the rule above. If OS
-display-sleep also drops the handle, that conflation is acceptable: both states mean
+`-2` must read as ON: it is the Philips' chronic on-state and only a ~2 s power-down
+transition on the Dell. (A hypothetical panel whose *off*-state is chronic `-2` would
+defeat this rule — exactly what per-machine calibration at enrollment is for.)
+
+**Decision:** `monitor_detect_mode = ddc` for this machine, evaluating the full rule
+above (handle presence **and** VCP power value together, never either alone). If OS
+display-sleep trips the same signals, that conflation is acceptable: both states mean
 the screen is dark ⇒ not screentime.
 
-**Agent follow-up (Phase 2 refinement):** sample physical-monitor-handle count as a raw
-per-sample signal (e.g. `phys_monitors`) next to `monitors_active`/`display_power`, on
-its own goroutine at a ~2 s cadence with a cached read (DDC transactions are slow and
-must not stall the sampler; see the probe's `ddcLoop` for the pattern).
+**Agent follow-up (Phase 2 refinement):** upload the raw `ddc_power` value itself as a
+per-sample column (the §4.4c upload-raw-signals principle) next to
+`monitors_active`/`display_power`, sampled on its own goroutine at ~2 s with a cached
+read (DDC transactions are slow and must never stall the sampler; see the probe's
+`ddcLoop` for the pattern). Derive `monitor_on` server-side per device mode.
 
-## Machine 2 — HDMI machine · PENDING
+## Machine 2 — a second PC (different GPU) · PENDING
 
-Run `dist\montest.exe` (built from the current probe — includes the `ddc_power` column)
-on the HDMI machine: power the monitor off ~30 s the household way, hands off input
-during the window, power on, Ctrl+C. The startup banner records the connector type; the
-CSV answers which rung of the ladder that machine lands on.
+All three rounds above share one PC/GPU. Running the probe on another household machine
+(any connector) adds the missing GPU datapoint and calibrates that device's own mode —
+same procedure: copy `dist\montest.exe`, run it, power the monitor off ~30 s hands-off,
+power on, Ctrl+C, read the CSV against the rule above.
