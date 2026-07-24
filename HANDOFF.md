@@ -45,8 +45,23 @@ the repo; it's committed on branch `claude/screentime-app-plan-nttogj`.
     window titles **server-side on ingest** so they are never stored. Titles are only ever rendered
     as React text (auto-escaped) — no `dangerouslySetInnerHTML` — so a hostile window title can't
     inject script.
-- **Not started:** Phases 6–8 (Proxmox deploy → availability/observability → polish). See
-  [PLAN.md §10](./PLAN.md).
+  - **Phase 6 — Production deployment** (see [deploy/RUNBOOK.md](./deploy/RUNBOOK.md)): the
+    backend runs on the household **Alpine VM (Proxmox vmid 101, 192.168.1.6)** as its own
+    Docker compose project on **port 8090** — `http://192.168.1.6:8090` — with nightly
+    `sqlite3 .backup` + rotation via cron, and a **DR restore drill performed and passed**.
+    Deployed as a container rather than the plan's Debian-LXC-and-systemd because that host
+    already runs the household Docker stack; the static `CGO_ENABLED=0` binary runs fine on
+    musl. Verified in production: real agent enrolled and reporting, signed release staged, and
+    a stale agent **self-updated 0.0.1 → 0.6.0 against the deployed server**.
+- **Not started:** Phases 7–8 (availability/observability → polish), plus the deliberately
+  deferred **external reachability** below. See [PLAN.md §10](./PLAN.md).
+
+### Phase 6 caveat — the backend is LAN-only right now
+
+PLAN.md §8.2 calls for a **Cloudflare Tunnel + Cloudflare Access**. That needs your Cloudflare
+account (an interactive browser login) and a hostname decision, so it is **not configured**:
+roaming agents and off-network phones cannot reach the backend yet, and the dashboard has **no
+authentication** — do not expose port 8090 as-is. Options are written up in the runbook.
 
 ### One Phase 5 nuance deferred
 
