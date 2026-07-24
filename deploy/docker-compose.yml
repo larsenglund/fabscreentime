@@ -1,0 +1,38 @@
+# FabScreenTime backend — its own compose project, deliberately separate from the
+# household stack in /root/docker-compose.yml so deploys here can never restart
+# pihole (LAN DNS) or wake the intentionally-stopped ib-gateway containers.
+#
+#   deploy:  docker compose -p fabscreentime up -d --build
+#   logs:    docker compose -p fabscreentime logs -f
+#
+# Port 8090 on the host (8080 is claimed by the household stack's ops-monitor).
+services:
+  fabscreentimed:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        VERSION: ${FST_VERSION:-dev}
+    image: fabscreentimed:latest
+    container_name: fabscreentimed
+    restart: unless-stopped
+    ports:
+      - "${FST_BIND:-0.0.0.0}:${FST_PORT:-8090}:8080"
+    volumes:
+      - fst_data:/var/lib/fabscreentime
+      # Signed agent release (agent.exe + manifest.json) served for auto-update.
+      - fst_agent:/srv/agent
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  fst_data:
+  fst_agent:
