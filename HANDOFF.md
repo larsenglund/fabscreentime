@@ -246,7 +246,7 @@ covered by `go test ./internal/agent -run SelfUpdate`.)
 go build -ldflags "-s -w -H=windowsgui -X main.Version=0.1.0 -X main.Build=1" -o dist\agent.exe .\cmd\agent
 ```
 
-**Install hidden autostart** (copies to `%LOCALAPPDATA%\FabScreenTime\agent.exe`, registers a
+**Install hidden autostart** (copies to `%ProgramData%\FabScreenTime\agent.exe`, registers a
 hidden "at logon" Scheduled Task, and starts it):
 
 ```powershell
@@ -254,24 +254,36 @@ dist\agent.exe -install -server http://localhost:8080
 ```
 
 Verify it's running and hidden:
-- `Get-ScheduledTask -TaskName FabScreenTimeAgent` shows the task.
+- `Get-ScheduledTask -TaskName FabScreenTimeAgent` shows the task (State should reach **Running**).
 - Task Scheduler → the task has **Hidden** checked, runs at logon, LIMITED, restart-on-failure.
 - Task Manager → Details → `agent.exe` is present; **no** window, **no** tray icon.
 - The dashboard shows the device reporting.
+- If it doesn't run, read the log: `Get-Content "$env:ProgramData\FabScreenTime\agent.log"` —
+  the silent build logs there (added 2026-07-24; the GUI subsystem has no console).
+
+**Install location is `%ProgramData%`, not `%LOCALAPPDATA%` (learned the hard way 2026-07-24).**
+A hidden Scheduled Task launching an unsigned exe from the user's `AppData\Local` profile is the
+textbook malware-persistence pattern, and Windows' app-reputation heuristics **silently block the
+Task-Scheduler launch from there** — the process is never created and *no event is logged*, while
+the same exe runs fine interactively and from `%ProgramData%`. A standard user can create the
+ProgramData folder without UAC, and the DPAPI token stays per-user, so this is a clean fix, not a
+downgrade. Symptom if you ever see it: `schtasks` result `0x80070002` (file-not-found) on an exe
+that plainly exists.
 
 **Uninstall:**
 
 ```powershell
 dist\agent.exe -uninstall
 # then remove leftover files if you want a clean machine:
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\FabScreenTime"
+Remove-Item -Recurse -Force "$env:ProgramData\FabScreenTime"
 ```
 
 ### Antivirus / SmartScreen reality (expected)
 
 A hidden, self-persisting, self-updating exe **looks like spyware to Defender/SmartScreen** — that's
-inherent, not a bug (PLAN.md §9). On your own test machine you can allow it. For real deployment the
-plan covers code-signing / Trusted-Publisher and a scoped exclusion. **Do not** disable Defender
+inherent, not a bug (PLAN.md §9); the ProgramData install location above is what makes the hidden
+autostart actually launch. For real deployment the plan covers code-signing / Trusted-Publisher and
+a scoped exclusion. **Do not** disable Defender
 globally, and don't install this on any work/school/EDR-managed machine.
 
 ---

@@ -173,7 +173,7 @@ export function buildInstaller(server: string, secret: string): string {
     "$ErrorActionPreference = 'Stop'",
     `$Server = '${server}'`,
     `$Secret = '${secret}'`,
-    "$dir = Join-Path $env:LOCALAPPDATA 'FabScreenTime'",
+    "$dir = Join-Path $env:ProgramData 'FabScreenTime'",
     "New-Item -ItemType Directory -Force -Path $dir | Out-Null",
     "$exe = Join-Path $dir 'agent.exe'",
     'Write-Host "Downloading agent from $Server ..."',

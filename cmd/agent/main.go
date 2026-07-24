@@ -39,6 +39,15 @@ func main() {
 	uninstall := flag.Bool("uninstall", false, "remove the autostart Scheduled Task and exit")
 	flag.Parse()
 
+	// Route logging to a file as early as possible (after datadir is known) so a
+	// fatal during startup is captured for the silent, console-less build. -once
+	// stays on stderr only (it prints JSON to stdout for CI).
+	if !*once {
+		if f := agent.SetupFileLogging(*dataDir); f != nil {
+			defer f.Close()
+		}
+	}
+
 	if *once {
 		r, err := agent.NewSampler().Sample()
 		if err != nil {

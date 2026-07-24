@@ -16,8 +16,19 @@ import (
 
 const taskName = "FabScreenTimeAgent"
 
-// InstallDir is the per-user install location (%LOCALAPPDATA%\FabScreenTime).
+// InstallDir is the install location: %ProgramData%\FabScreenTime.
+//
+// NOT %LOCALAPPDATA%: a hidden Scheduled Task launching an unsigned exe from the
+// user's AppData\Local profile is the textbook malware-persistence pattern, and
+// Windows' app-reputation heuristics silently block Task-Scheduler launches from
+// there — the process is never created and no event is logged, while the same
+// exe runs fine interactively and from ProgramData (verified 2026-07-24). A
+// standard user can still create this folder without UAC, and the token stays
+// DPAPI-encrypted per-user, so an all-users folder does not expose it.
 func InstallDir() string {
+	if d := os.Getenv("ProgramData"); d != "" {
+		return filepath.Join(d, "FabScreenTime")
+	}
 	if d := os.Getenv("LOCALAPPDATA"); d != "" {
 		return filepath.Join(d, "FabScreenTime")
 	}
