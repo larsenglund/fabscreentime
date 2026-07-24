@@ -224,6 +224,29 @@ func (s *Server) RunRollups() {
 	}
 }
 
+// CatchUpRollups re-marks every (device, day) with samples in the last `days`
+// days and rolls them up now. The dirty set is in-memory, so without this a
+// restart between ingest and the next rollup tick would lose those days from
+// daily_stats permanently. Called once at startup; the rollup is idempotent.
+func (s *Server) CatchUpRollups(days int) {
+	since := s.now().AddDate(0, 0, -days).Unix()
+	pairs, err := s.store.RecentSampleDays(since)
+	if err != nil {
+		log.Printf("rollup catch-up: %v", err)
+		return
+	}
+	if len(pairs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	for _, p := range pairs {
+		s.dirty[dirtyKey{p.DeviceID, p.Day}] = true
+	}
+	s.mu.Unlock()
+	log.Printf("rollup catch-up: recomputing %d device-days", len(pairs))
+	s.RunRollups()
+}
+
 // StartRollupLoop runs RunRollups on interval until ctx is cancelled.
 func (s *Server) StartRollupLoop(ctx context.Context, interval time.Duration) {
 	go func() {
@@ -484,7 +507,7 @@ func (s *Server) handleTopApps(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	apps, err := s.store.DeviceTopApps(r.PathValue("uuid"), DayUTC(since.Unix()), DayUTC(until.Unix()), limit)
+	apps, err := s.store.DeviceTopApps(r.PathValue("uuid"), since.Unix(), until.Unix(), limit)
 	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return

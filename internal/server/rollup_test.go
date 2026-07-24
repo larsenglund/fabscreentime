@@ -255,12 +255,88 @@ func TestDashboardQueries(t *testing.T) {
 	}
 
 	// Top apps: game.exe=2, chrome.exe=1 (only monitor-on samples counted).
-	apps, err := st.DeviceTopApps("dev-dash", day, day, 10)
+	apps, err := st.DeviceTopApps("dev-dash", dayBase, dayBase+86400, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(apps) != 2 || apps[0].Exe != "game.exe" || apps[0].MonitorMinutes != 2 {
 		t.Fatalf("TopApps = %+v, want game.exe=2 first", apps)
+	}
+}
+
+// Top apps must not depend on the rollup ticker having run: a freshly enrolled
+// device showed an empty panel for up to an hour because this read the rollup
+// table while every other panel read raw samples.
+func TestTopAppsWithoutRollup(t *testing.T) {
+	st := openTestStore(t)
+	id, err := st.UpsertDevice("dev-fresh", "host", "1.0", dayBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.InsertSamples(id, []shared.Sample{
+		{ClientTS: dayBase + 60, MonitorOn: 1, Exe: "game.exe"},
+		{ClientTS: dayBase + 120, MonitorOn: 1, Exe: "game.exe"},
+		{ClientTS: dayBase + 180, MonitorOn: 1, Exe: "chrome.exe"},
+		{ClientTS: dayBase + 240, MonitorOn: 0, Exe: "ignored.exe"}, // monitor off → excluded
+	}, dayBase+300); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately NO RollupDay call — daily_app_stats is empty here.
+	var rollupRows int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM daily_app_stats`).Scan(&rollupRows); err != nil {
+		t.Fatal(err)
+	}
+	if rollupRows != 0 {
+		t.Fatalf("precondition: daily_app_stats should be empty, got %d rows", rollupRows)
+	}
+
+	apps, err := st.DeviceTopApps("dev-fresh", dayBase, dayBase+86400, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 2 {
+		t.Fatalf("TopApps = %+v, want 2 apps without any rollup having run", apps)
+	}
+	if apps[0].Exe != "game.exe" || apps[0].MonitorMinutes != 2 {
+		t.Fatalf("TopApps[0] = %+v, want game.exe=2", apps[0])
+	}
+	if apps[1].Exe != "chrome.exe" || apps[1].MonitorMinutes != 1 {
+		t.Fatalf("TopApps[1] = %+v, want chrome.exe=1", apps[1])
+	}
+}
+
+// A restart loses the in-memory dirty set; the startup sweep must rebuild it so
+// those days still land in daily_stats.
+func TestCatchUpRollupsAfterRestart(t *testing.T) {
+	st := openTestStore(t)
+	id, err := st.UpsertDevice("dev-restart", "host", "1.0", dayBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.InsertSamples(id, []shared.Sample{
+		{ClientTS: dayBase + 60, MonitorOn: 1, Exe: "a.exe"},
+		{ClientTS: dayBase + 120, MonitorOn: 1, Exe: "a.exe"},
+	}, dayBase+300); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh Server = the post-restart state: dirty set empty, nothing rolled up.
+	srv := New(st, "")
+	srv.now = func() time.Time { return time.Unix(dayBase+3600, 0) }
+	var before int
+	_ = st.db.QueryRow(`SELECT COUNT(*) FROM daily_stats`).Scan(&before)
+	if before != 0 {
+		t.Fatalf("precondition: daily_stats should be empty, got %d", before)
+	}
+
+	srv.CatchUpRollups(3)
+
+	var mon int
+	if err := st.db.QueryRow(`SELECT monitor_minutes FROM daily_stats WHERE device_id=?`, id).Scan(&mon); err != nil {
+		t.Fatalf("catch-up did not roll up the day: %v", err)
+	}
+	if mon != 2 {
+		t.Fatalf("monitor_minutes = %d, want 2", mon)
 	}
 }
 

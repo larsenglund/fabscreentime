@@ -34,6 +34,9 @@ func main() {
 	defer stop()
 
 	app := server.New(store, *agentDir)
+	// Recompute recent days first: the dirty set is in-memory, so a restart
+	// would otherwise drop rollups for days ingested just before shutdown.
+	app.CatchUpRollups(3)
 	app.StartRollupLoop(ctx, *rollupEvery)
 
 	srv := &http.Server{

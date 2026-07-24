@@ -718,16 +718,24 @@ type AppStat struct {
 }
 
 // DeviceTopApps returns a device's top foreground apps by monitor-on minutes for
-// days in [fromDay, toDay], from the permanent per-app rollup.
-func (s *Store) DeviceTopApps(uuid, fromDay, toDay string, limit int) ([]AppStat, error) {
+// ts in [fromUnix, toUnix).
+//
+// This reads RAW samples, like the timeline and summary queries — not the
+// daily_app_stats rollup. Reading the rollup made this the only panel that
+// depended on the (hourly) rollup ticker having run, so a freshly enrolled
+// device showed an empty "Top apps" for up to an hour while every other panel
+// had data. Raw retention (~90d; purge deferred, PLAN.md §6.2) comfortably
+// covers every range the UI offers, and the rollup stays the permanent
+// post-purge record.
+func (s *Store) DeviceTopApps(uuid string, fromUnix, toUnix int64, limit int) ([]AppStat, error) {
 	id, err := s.deviceIDByUUID(uuid)
 	if err != nil {
 		return nil, err
 	}
 	rows, err := s.db.Query(`
-		SELECT COALESCE(NULLIF(exe_name,''),'(unknown)') AS exe, SUM(monitor_minutes) AS mins
-		FROM daily_app_stats WHERE device_id = ? AND day >= ? AND day <= ?
-		GROUP BY exe ORDER BY mins DESC LIMIT ?`, id, fromDay, toDay, limit)
+		SELECT COALESCE(NULLIF(exe_name,''),'(unknown)') AS exe, COUNT(*) AS mins
+		FROM samples WHERE device_id = ? AND monitor_on = 1 AND ts >= ? AND ts < ?
+		GROUP BY exe ORDER BY mins DESC, exe LIMIT ?`, id, fromUnix, toUnix, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -739,6 +747,37 @@ func (s *Store) DeviceTopApps(uuid, fromDay, toDay string, limit int) ([]AppStat
 			return nil, err
 		}
 		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// DeviceDay identifies one device's UTC day, the unit the rollup works on.
+type DeviceDay struct {
+	DeviceID int64
+	Day      string
+}
+
+// RecentSampleDays lists the (device, UTC day) pairs that have samples at or
+// after sinceUnix. The dirty set that drives rollups lives in memory, so a
+// restart would otherwise silently drop any day that was ingested but not yet
+// rolled up (PLAN.md §6.3 warns these minutes "silently vanish"). Re-marking
+// recent days at startup makes that self-healing; the rollup is idempotent, so
+// redoing a day costs nothing.
+func (s *Store) RecentSampleDays(sinceUnix int64) ([]DeviceDay, error) {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT device_id, strftime('%Y-%m-%d', ts, 'unixepoch')
+		FROM samples WHERE ts >= ?`, sinceUnix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DeviceDay
+	for rows.Next() {
+		var d DeviceDay
+		if err := rows.Scan(&d.DeviceID, &d.Day); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
 	}
 	return out, rows.Err()
 }
