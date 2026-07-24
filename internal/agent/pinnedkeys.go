@@ -15,8 +15,8 @@ import (
 // here. Empty by default so a stock build FAILS CLOSED — it will never
 // self-update until you pin your own key.
 var pinnedUpdateKeysHex = []string{
-	// "….", // primary   (from: fst-sign genkey)
-	// "….", // rotation  (kept on separate offline media)
+	"0a8065a7229b292842b055aed80c06b338ada7becff73453d23f2ef7cdcfff53", // primary (release.key on Lars's dev machine)
+	// "….", // rotation — generate a second offline key and pin it before real deployment (§5.3 H2)
 }
 
 // PinnedUpdateKeys returns the parsed pinned public keys (invalid entries skipped).

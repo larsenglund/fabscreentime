@@ -14,34 +14,41 @@ the repo; it's committed on branch `claude/screentime-app-plan-nttogj`.
 ## 1. Where things stand
 
 - **Branch:** `claude/screentime-app-plan-nttogj` (NOT merged to a default branch). All work is here.
-- **Last commit:** `c670971` — "Implement Phase 2".
 - **Done & tested (Linux + Windows cross-compile; CI runs the real Win32 code on `windows-latest`):**
   - **Phase 0** — walking skeleton: agent sampling, bounded offline queue, batched idempotent
     ingest with timestamp clamping, per-device summary, no-build placeholder dashboard.
   - **Phase 1** — signed auto-update firebreak: Ed25519-signed manifests, dual pinned keys,
     monotonic anti-rollback, same-origin download enforcement, fail-closed verify-before-swap,
-    offline signing CLI (`fst-sign`). Fully tested including all rejection paths.
-  - **Phase 2** — monitor signal (poll-based connected-monitor count — the physical-power-off
-    signal), transition `monitor_events`, exact-interval monitor-on minutes, dirty-days rollup
-    engine, hidden Scheduled-Task autostart (`agent -install`/`-uninstall`).
-- **Not started:** Phases 3–8 (auth/enrollment/tokens → dashboard → install-from-website →
-  Proxmox deploy → availability/observability → polish). See [PLAN.md §10](./PLAN.md).
+    offline signing CLI (`fst-sign`). **Now enabled** — a real key is pinned (see §6/§7); the
+    dev release loop is `scripts/release-local.ps1`.
+  - **Phase 2** — monitor signal, transition `monitor_events`, exact-interval monitor-on minutes,
+    dirty-days rollup, hidden Scheduled-Task autostart. **Monitor-off detection finalized as the
+    DDC/dxva2 signal** (see [MONTEST-RESULTS.md](./MONTEST-RESULTS.md)): the connected-monitor
+    count never drops on this fleet, so `ddc_power` is the load-bearing signal.
+  - **Phase 3** — auth, enrollment & per-device tokens: one-time enrollment secrets (hashed,
+    single-use, 15-min TTL, IP rate-limited), durable per-device bearer tokens (hashed at rest;
+    ingest is 401 without a valid one), revocation, DPAPI-encrypted token on the client. Full
+    server + agent + credential tests.
+  - **Install-from-website (part of Phase 5), first cut** — the placeholder dashboard has a
+    working **Add device** flow: name a machine → mint a one-time secret → download a personalized
+    silent installer (secret in the file body, hash-checked against the manifest) → live
+    "waiting… ✓ connected" poll. Device list shows status + a Revoke action.
+- **Not started / partial:** Phase 4 (React dashboard — still the placeholder), rest of Phase 5,
+  Phases 6–8 (Proxmox deploy → availability/observability → polish). See [PLAN.md §10](./PLAN.md).
 
-### Two things that need YOU / real hardware (can't be done in the cloud)
+### Things that still need YOU / real hardware
 
-1. **`montest` validation** (section 5) — the one gating experiment: does physically powering a
-   monitor off drop the connected-monitor count? Decides the primary metric per machine. **Do this
-   first.**
-2. **Pin your own signing key** (section 6) — `fst-sign genkey`, paste the public key, so
-   auto-update actually works. The private key must stay offline.
+1. **`montest` on a second PC (different GPU)** — the last open datapoint (section 5). Not
+   blocking; every enrolled machine is calibrated by the probe anyway.
+2. **A rotation signing key before real deployment** — only the primary key is pinned. Generate a
+   second offline key and add it to `pinnedUpdateKeysHex` (§5.3 H2) so a primary-key compromise is
+   recoverable without re-imaging. The private `release.key` must stay offline (it's gitignored).
 
 ### One deliberate deferral
 
 The **display-power (DPMS) message-pump watcher** (`GUID_SESSION_DISPLAY_STATUS`) is not
-implemented — it's the one piece that needs a Windows box to write safely. Until then
-`display_power` is "unknown" and `monitor_on` falls back to the connected-monitor **count**, which
-is exactly the signal that detects a physical power-off. Adding the pump is a good early local task
-(see section 9).
+implemented. `display_power` stays "unknown"; `monitor_on` is driven by the DDC/dxva2 signal plus
+the connected-monitor count. Adding the pump is a good local task (see section 9).
 
 ---
 
@@ -275,9 +282,17 @@ globally, and don't install this on any work/school/EDR-managed machine.
 go build ./...                              # build everything
 go test ./...                               # run all tests
 gofmt -w .                                  # format
-go run .\cmd\fabscreentimed -db .\dev.db    # backend on :8080
-go run .\cmd\agent -server http://localhost:8080 -interval 5s -datadir .\agentdata
+# Backend with the signed agent release served for auto-update:
+go run .\cmd\fabscreentimed -db .\dev.db -agentdir agentrelease   # :8080
+
+# Enroll a device: open http://localhost:8080 → "Add device" (mints a one-time
+# secret + downloads a silent installer). For a manual/dev enroll without the UI:
+go run .\cmd\agent -server http://localhost:8080 -interval 5s -datadir .\agentdata `
+  -enroll <one-time-secret-from-/api/enroll/prepare>
+# After first enroll the token is saved (DPAPI) in <datadir>\credentials.json; drop -enroll.
+
+# Ship a new client build; running agents self-update within one ingest cycle:
+powershell -ExecutionPolicy Bypass -File .\scripts\release-local.ps1 -Version 0.3.0
+
 go build -o montest.exe .\cmd\montest ; .\montest.exe   # monitor probe
-go run .\cmd\fst-sign genkey -out release.key           # signing key
-# Git Bash: ./scripts/build.sh 1.0.0        # builds silent agent.exe + montest.exe + fst-sign
 ```

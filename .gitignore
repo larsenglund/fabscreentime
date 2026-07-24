@@ -1,6 +1,7 @@
 # Build output
 /bin/
 /dist/
+/agentrelease/
 *.exe
 
 # Local runtime state
@@ -13,6 +14,8 @@ montest*.csv
 /run/
 queue.json
 device_id
+credentials.json
+enroll.json
 
 # Signing keys — NEVER commit the private update-signing key
 *.key
