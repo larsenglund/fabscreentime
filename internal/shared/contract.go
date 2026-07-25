@@ -127,8 +127,16 @@ type DeviceStatus struct {
 	Status       string `json:"status"`
 	LastSeen     int64  `json:"last_seen"`
 	AgentVersion string `json:"agent_version"`
+	AgentBuild   int64  `json:"agent_build"` // monotonic build, for the behind-latest flag (§5.3 M4)
 	EnrolledAt   int64  `json:"enrolled_at"`
 	LogTitles    bool   `json:"log_titles"` // false = window titles are dropped (privacy opt-out, §9)
+}
+
+// LatestAgent describes the current published agent release, so the dashboard can
+// flag devices running behind it.
+type LatestAgent struct {
+	Version string `json:"version"`
+	Build   int64  `json:"build"`
 }
 
 // PatchDeviceRequest updates a device from the dashboard (rename / revoke / title opt-out).

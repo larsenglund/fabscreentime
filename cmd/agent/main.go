@@ -74,9 +74,22 @@ func main() {
 	}
 
 	// One agent per user session — the update relaunch and a Task Scheduler
-	// trigger must not double-run (PLAN.md §5.2).
-	release, ok := agent.SingleInstance("FabScreenTimeAgent")
-	if !ok {
+	// trigger must not double-run (PLAN.md §5.2). Acquire the lock with a short
+	// retry: a self-update relaunch spawns the new process while the old one is
+	// still exiting, so the new one can momentarily see the old one's mutex. Retry
+	// for a few seconds so the handoff succeeds; a genuine second instance still
+	// gives up (harmlessly) after the wait. (Without this, an update could leave
+	// NO agent running — the new process exits on the lock and the task, having
+	// exited 0, never restarts.)
+	var release func()
+	var gotLock bool
+	for i := 0; i < 30; i++ {
+		if release, gotLock = agent.SingleInstance("FabScreenTimeAgent"); gotLock {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !gotLock {
 		log.Print("another agent instance is already running; exiting")
 		return
 	}
