@@ -53,7 +53,13 @@ func (n *ntfyNotifier) Send(title, message, priority string) {
 // the last check and alerts on each transition (once, not every tick). Active
 // devices only — pending/expired/revoked never alert. The first pass after
 // startup only seeds state (no alerts), so a restart doesn't spam alerts for
-// devices that were already off.
+// devices that were already off; a device seeded as offline does NOT later
+// produce a spurious "back online".
+//
+// s.alerted maps a currently-offline device UUID to whether we actually SENT it
+// an offline alert (true) versus merely seeded it (false). Notifications are
+// collected under the lock and sent AFTER releasing it, so a slow or unreachable
+// notifier can never stall the ingest hot path (which shares s.mu via markDirty).
 func (s *Server) checkOffline(now int64) {
 	if s.notifier == nil {
 		return
@@ -64,42 +70,58 @@ func (s *Server) checkOffline(now int64) {
 		return
 	}
 	threshold := int64(s.offlineAfter.Seconds())
+	displayName := func(name, hostname string) string {
+		if name != "" {
+			return name
+		}
+		return hostname
+	}
+	type note struct{ title, message, priority string }
+	var toSend []note
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	active := make(map[string]bool, len(devices))
 	for _, d := range devices {
 		if d.Status != "active" || d.LastSeen == 0 {
 			continue
 		}
+		active[d.DeviceUUID] = true
 		offline := now-d.LastSeen > threshold
-		alerted := s.alerted[d.DeviceUUID]
+		alerted, tracked := s.alerted[d.DeviceUUID]
 
 		if !s.alertSeeded {
 			if offline {
-				s.alerted[d.DeviceUUID] = true // seed silently on first pass
+				s.alerted[d.DeviceUUID] = false // seeded, not alerted
 			}
 			continue
 		}
 		switch {
-		case offline && !alerted:
+		case offline && !tracked:
 			s.alerted[d.DeviceUUID] = true
-			name := d.Name
-			if name == "" {
-				name = d.Hostname
-			}
 			mins := (now - d.LastSeen) / 60
-			s.notifier.Send("Device offline",
-				fmt.Sprintf("%s stopped reporting (last seen %d min ago).", name, mins), "high")
-		case !offline && alerted:
-			delete(s.alerted, d.DeviceUUID)
-			name := d.Name
-			if name == "" {
-				name = d.Hostname
+			toSend = append(toSend, note{"Device offline",
+				fmt.Sprintf("%s stopped reporting (last seen %d min ago).", displayName(d.Name, d.Hostname), mins), "high"})
+		case !offline && tracked:
+			if alerted { // only announce recovery if we actually alerted the offline
+				toSend = append(toSend, note{"Device back online",
+					fmt.Sprintf("%s is reporting again.", displayName(d.Name, d.Hostname)), "default"})
 			}
-			s.notifier.Send("Device back online", fmt.Sprintf("%s is reporting again.", name), "default")
+			delete(s.alerted, d.DeviceUUID)
+		}
+	}
+	// Prune tracked entries for devices that are no longer active (revoked or
+	// deleted), so the map can't leak by UUID.
+	for uuid := range s.alerted {
+		if !active[uuid] {
+			delete(s.alerted, uuid)
 		}
 	}
 	s.alertSeeded = true
+	s.mu.Unlock()
+
+	for _, n := range toSend {
+		s.notifier.Send(n.title, n.message, n.priority)
+	}
 }
 
 // StartAlertLoop runs the offline-device check on interval until ctx is done.

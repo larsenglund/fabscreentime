@@ -63,3 +63,46 @@ func TestOfflineAlertsTransitionOnce(t *testing.T) {
 		t.Fatalf("recovery should alert, got %d: %v", len(fake.calls), fake.calls)
 	}
 }
+
+func TestSeededOfflineDeviceNoSpuriousRecovery(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	srv, st := newTestServer(t, now)
+	fake := &fakeNotifier{}
+	srv.notifier = fake
+	srv.offlineAfter = 15 * time.Minute
+	h := srv.Handler()
+
+	a, _ := enrollDevice(t, h, "A")
+	setLastSeen(t, st, a, now.Add(-30*time.Minute).Unix()) // offline at seed time
+
+	srv.checkOffline(now.Unix()) // seed: A offline but no alert
+	// A comes back — we never announced it offline, so no "back online".
+	setLastSeen(t, st, a, now.Unix())
+	srv.checkOffline(now.Unix())
+	if len(fake.calls) != 0 {
+		t.Fatalf("a seeded (never-alerted) device must not announce recovery, got %v", fake.calls)
+	}
+}
+
+func TestAlertedEntryPrunedWhenDeviceDeleted(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	srv, st := newTestServer(t, now)
+	srv.notifier = &fakeNotifier{}
+	srv.offlineAfter = 15 * time.Minute
+	h := srv.Handler()
+
+	a, _ := enrollDevice(t, h, "A")
+	srv.checkOffline(now.Unix()) // seed (A online)
+	setLastSeen(t, st, a, now.Add(-20*time.Minute).Unix())
+	srv.checkOffline(now.Unix()) // A offline → alerted
+	if len(srv.alerted) != 1 {
+		t.Fatalf("expected A tracked as alerted, got %d", len(srv.alerted))
+	}
+	if _, err := st.DeleteDevice(a); err != nil {
+		t.Fatal(err)
+	}
+	srv.checkOffline(now.Unix()) // A gone → pruned, no leak
+	if len(srv.alerted) != 0 {
+		t.Fatalf("alerted map should be pruned after delete, got %d", len(srv.alerted))
+	}
+}

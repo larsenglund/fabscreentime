@@ -64,6 +64,30 @@ func TestEvaluateStartupTrialCommitAndRollback(t *testing.T) {
 	}
 }
 
+func TestGracefulRestartsAreNotCrashes(t *testing.T) {
+	dir := t.TempDir()
+	now := int64(1_000_000)
+	EvaluateStartup(dir, 200, now) // first start of a new build
+	// Rapid restarts that each shut down gracefully (reboots) must NOT roll back,
+	// even without a check-in (e.g. the backend is temporarily unreachable).
+	for i := int64(1); i <= 4; i++ {
+		MarkCleanExit(dir, 200)
+		if d := EvaluateStartup(dir, 200, now+i*30); d.Rollback {
+			t.Fatalf("graceful restart %d must not roll back", i)
+		}
+	}
+}
+
+func TestUngracefulRestartsStillRollBack(t *testing.T) {
+	dir := t.TempDir()
+	now := int64(1_000_000)
+	EvaluateStartup(dir, 200, now)    // start 1 (no MarkCleanExit = crash)
+	EvaluateStartup(dir, 200, now+10) // start 2 (crash)
+	if d := EvaluateStartup(dir, 200, now+20); !d.Rollback {
+		t.Fatal("three ungraceful restarts within the window should roll back")
+	}
+}
+
 func TestCrashLoopOutsideWindowIsNotRolledBack(t *testing.T) {
 	dir := t.TempDir()
 	now := int64(1_000_000)

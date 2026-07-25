@@ -138,6 +138,10 @@ func main() {
 	log.Printf("agent %s (build %d) starting: device=%s host=%s server=%s interval=%s",
 		Version, build, creds.DeviceUUID, hostname, serverURL, *interval)
 	a.Run(ctx)
+
+	// Run only returns on graceful shutdown (ctx cancelled). Record it so this
+	// stop/reboot isn't miscounted as a crash on the next start (§5.4).
+	agent.MarkCleanExit(*dataDir, build)
 }
 
 // resolveCredentials returns the server URL and durable credentials, enrolling on

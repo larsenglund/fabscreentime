@@ -27,6 +27,7 @@ type UpdateState struct {
 	StartCount  int   `json:"start_count"` // starts of Build with no check-in yet
 	Committed   bool  `json:"committed"`   // has Build ever checked in?
 	Quarantined int64 `json:"quarantined"` // a known-bad build the updater must refuse
+	CleanExit   bool  `json:"clean_exit"`  // did the previous run of Build shut down gracefully?
 }
 
 func loadUpdateState(dir string) UpdateState {
@@ -52,9 +53,16 @@ type StartupDecision struct {
 
 // EvaluateStartup records this start and reports whether the current build is
 // crash-looping and must be rolled back. `now` is unix seconds (injectable).
+//
+// Only an UNGRACEFUL previous exit counts toward the crash total: a graceful
+// shutdown (reboot/stop/uninstall — see MarkCleanExit) sets CleanExit, so a
+// healthy build that simply can't reach the backend and is rebooted a few times
+// is not mistaken for a crash loop. It always clears CleanExit for this run, so a
+// crash (which never reaches MarkCleanExit) leaves it false.
 func EvaluateStartup(dir string, currentBuild, now int64) StartupDecision {
 	s := loadUpdateState(dir)
 	quarantined := s.Quarantined
+	prevExitClean := s.CleanExit
 
 	// A different build than we were tracking = a fresh install, an applied
 	// update, or the restored old build after a rollback. Start its probation.
@@ -70,7 +78,15 @@ func EvaluateStartup(dir string, currentBuild, now int64) StartupDecision {
 		return StartupDecision{Quarantined: quarantined}
 	}
 
-	// Same build, still no check-in: this restart may be a crash.
+	s.CleanExit = false // reset for this run; a crash leaves it false
+
+	// A graceful previous exit is not a crash — don't count it.
+	if prevExitClean {
+		saveUpdateState(dir, s)
+		return StartupDecision{Quarantined: quarantined}
+	}
+
+	// Same build, still no check-in, previous exit was not graceful: a crash.
 	s.StartCount++
 	if s.StartCount >= crashThreshold && now-s.FirstStart <= crashWindowSecs {
 		// Crash loop. Quarantine this build; the restored old build (a different
@@ -88,6 +104,17 @@ func MarkCheckedIn(dir string, currentBuild int64) {
 	s := loadUpdateState(dir)
 	if s.Build == currentBuild && !s.Committed {
 		s.Committed = true
+		saveUpdateState(dir, s)
+	}
+}
+
+// MarkCleanExit records that this run is shutting down gracefully (the run loop
+// returned because the context was cancelled — a stop/reboot, not a crash), so
+// the next start doesn't count this restart toward a crash loop (§5.4).
+func MarkCleanExit(dir string, currentBuild int64) {
+	s := loadUpdateState(dir)
+	if s.Build == currentBuild {
+		s.CleanExit = true
 		saveUpdateState(dir, s)
 	}
 }
