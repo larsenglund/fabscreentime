@@ -23,6 +23,8 @@ export interface DeviceStatus {
   agent_build: number;
   enrolled_at: number;
   log_titles: boolean;
+  clock_skew: number;
+  clock_skew_known: boolean;
 }
 
 export interface LatestAgent {

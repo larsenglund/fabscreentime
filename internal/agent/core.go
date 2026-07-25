@@ -183,6 +183,7 @@ func (a *Agent) flush(ctx context.Context) {
 		AgentBuild:   a.cfg.Build,
 		DeviceUUID:   a.cfg.DeviceUUID,
 		Hostname:     a.cfg.Hostname,
+		ClientNow:    a.cfg.Now().Unix(), // for server-side clock-skew detection (§8)
 		Samples:      batch,
 		Events:       events,
 	})

@@ -349,6 +349,42 @@ func TestBehindLatestFlag(t *testing.T) {
 	}
 }
 
+// TestClockSkewObservedOnIngest covers the §8 clock-skew flag: an agent that
+// reports a wall-clock ahead of the server records a positive skew on its status;
+// an agent that omits client_now leaves the last-known skew untouched.
+func TestClockSkewObservedOnIngest(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	srv, _ := newTestServer(t, now)
+	h := srv.Handler()
+	uuid, token := enrollDevice(t, h, "skewed")
+
+	// Fresh device: skew unknown until the agent reports its clock.
+	var d shared.DeviceStatus
+	mustJSON(t, doJSON(t, h, http.MethodGet, "/api/devices/"+uuid, "", nil).Body.Bytes(), &d)
+	if d.ClockSkewKnown {
+		t.Fatalf("clock skew should be unknown before any client_now is reported")
+	}
+
+	// Agent clock is 300s ahead of the server.
+	doIngest(t, h, token, shared.IngestRequest{
+		ClientNow: now.Unix() + 300,
+		Samples:   []shared.Sample{{ClientTS: now.Unix(), MonitorOn: 1, Exe: "a.exe"}},
+	})
+	mustJSON(t, doJSON(t, h, http.MethodGet, "/api/devices/"+uuid, "", nil).Body.Bytes(), &d)
+	if !d.ClockSkewKnown || d.ClockSkew != 300 {
+		t.Fatalf("clock_skew = %d (known=%v), want +300 known", d.ClockSkew, d.ClockSkewKnown)
+	}
+
+	// A later ingest without client_now (older agent) must not blank the skew.
+	doIngest(t, h, token, shared.IngestRequest{
+		Samples: []shared.Sample{{ClientTS: now.Unix() + 1, MonitorOn: 1, Exe: "a.exe"}},
+	})
+	mustJSON(t, doJSON(t, h, http.MethodGet, "/api/devices/"+uuid, "", nil).Body.Bytes(), &d)
+	if !d.ClockSkewKnown || d.ClockSkew != 300 {
+		t.Fatalf("clock_skew after skewless ingest = %d (known=%v), want +300 retained", d.ClockSkew, d.ClockSkewKnown)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	srv, _ := newTestServer(t, time.Now())
 	rec := httptest.NewRecorder()

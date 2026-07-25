@@ -166,7 +166,15 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.now().Unix()
-	if err := s.store.TouchDevice(id, req.Hostname, req.AgentVersion, req.AgentBuild, now); err != nil {
+	// Clock-skew (§8): the agent stamps its own wall-clock at upload, so a genuinely
+	// wrong device clock is visible even though we clamp sample timestamps. A little
+	// upload latency biases this a second or two negative — far under the flag
+	// threshold. Absent (old agent) → leave the last-known skew untouched.
+	var skew sql.NullInt64
+	if req.ClientNow != 0 {
+		skew = sql.NullInt64{Int64: req.ClientNow - now, Valid: true}
+	}
+	if err := s.store.TouchDevice(id, req.Hostname, req.AgentVersion, req.AgentBuild, skew, now); err != nil {
 		log.Printf("touch device: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return

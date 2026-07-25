@@ -27,6 +27,19 @@ export function online(ts: number): boolean {
   return !!ts && Date.now() / 1000 - ts < 180;
 }
 
+/** CLOCK_SKEW_FLAG_SECONDS is the |skew| above which a device's clock is flagged.
+ *  Well above normal upload latency + sample age, so only a genuinely wrong
+ *  device clock trips it (§8). */
+export const CLOCK_SKEW_FLAG_SECONDS = 120;
+
+/** fmtClockSkew renders a signed clock offset (seconds) like "3m fast" / "45s
+ *  slow" — positive means the device clock is ahead of the server. */
+export function fmtClockSkew(sec: number): string {
+  const a = Math.abs(Math.round(sec));
+  const mag = a < 90 ? `${a}s` : a < 5400 ? `${Math.round(a / 60)}m` : `${Math.round(a / 3600)}h`;
+  return `${mag} ${sec >= 0 ? "fast" : "slow"}`;
+}
+
 /** todayUTC returns today's date as YYYY-MM-DD in UTC (matches the backend's
  *  day boundaries). */
 export function todayUTC(): string {

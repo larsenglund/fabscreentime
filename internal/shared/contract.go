@@ -38,6 +38,7 @@ type IngestRequest struct {
 	AgentBuild   int64          `json:"agent_build"` // monotonic build number, for the update-availability hint
 	DeviceUUID   string         `json:"device_uuid"` // Phase 0 identity; replaced by per-device tokens in Phase 3
 	Hostname     string         `json:"hostname"`
+	ClientNow    int64          `json:"client_now"` // agent wall-clock (unix s) at upload, for clock-skew detection (§8, 0 = not reported)
 	Samples      []Sample       `json:"samples"`
 	Events       []MonitorEvent `json:"events"`
 }
@@ -121,15 +122,17 @@ type EnrollResponse struct {
 // not yet used), active (enrolled and reporting), expired (secret lapsed unused),
 // revoked.
 type DeviceStatus struct {
-	DeviceUUID   string `json:"device_uuid"`
-	Name         string `json:"name"`
-	Hostname     string `json:"hostname"`
-	Status       string `json:"status"`
-	LastSeen     int64  `json:"last_seen"`
-	AgentVersion string `json:"agent_version"`
-	AgentBuild   int64  `json:"agent_build"` // monotonic build, for the behind-latest flag (§5.3 M4)
-	EnrolledAt   int64  `json:"enrolled_at"`
-	LogTitles    bool   `json:"log_titles"` // false = window titles are dropped (privacy opt-out, §9)
+	DeviceUUID     string `json:"device_uuid"`
+	Name           string `json:"name"`
+	Hostname       string `json:"hostname"`
+	Status         string `json:"status"`
+	LastSeen       int64  `json:"last_seen"`
+	AgentVersion   string `json:"agent_version"`
+	AgentBuild     int64  `json:"agent_build"` // monotonic build, for the behind-latest flag (§5.3 M4)
+	EnrolledAt     int64  `json:"enrolled_at"`
+	LogTitles      bool   `json:"log_titles"`       // false = window titles are dropped (privacy opt-out, §9)
+	ClockSkew      int64  `json:"clock_skew"`       // last observed agent-minus-server clock offset, seconds (valid only if ClockSkewKnown)
+	ClockSkewKnown bool   `json:"clock_skew_known"` // false = the agent has never reported its wall-clock (old agent / not yet seen)
 }
 
 // LatestAgent describes the current published agent release, so the dashboard can

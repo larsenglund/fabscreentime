@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useDevice, useHeatmap, usePatchDevice, useSignals, useTimeline, useTopApps } from "../lib/api";
-import { fmtMinutes, ago, todayUTC, shiftDay } from "../lib/format";
+import { fmtMinutes, ago, todayUTC, shiftDay, fmtClockSkew, CLOCK_SKEW_FLAG_SECONDS } from "../lib/format";
 import { Kpi } from "../components/Kpi";
 import { CardSection } from "../components/ui/card";
 import { StatusBadge } from "../components/ui/badge";
@@ -42,10 +42,20 @@ export function DeviceDetail() {
           {d && <StatusBadge device={d} />}
         </div>
         {d && (
-          <div className="mt-1 text-sm text-muted-foreground">
-            {d.hostname && <span>{d.hostname} · </span>}
-            {d.agent_version && <span>agent {d.agent_version} · </span>}
-            <span>{ago(d.last_seen)}</span>
+          <div className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-1 text-sm text-muted-foreground">
+            <span>
+              {d.hostname && <>{d.hostname} · </>}
+              {d.agent_version && <>agent {d.agent_version} · </>}
+              {ago(d.last_seen)}
+            </span>
+            {d.clock_skew_known && Math.abs(d.clock_skew) >= CLOCK_SKEW_FLAG_SECONDS && (
+              <span
+                className="rounded bg-rose-500/15 px-1.5 py-0.5 text-xs font-medium text-rose-600 dark:text-rose-400"
+                title="Large clock skew distorts when this device's activity is recorded. Check its time sync (e.g. Windows Internet Time)."
+              >
+                clock {fmtClockSkew(d.clock_skew)}
+              </span>
+            )}
           </div>
         )}
       </div>

@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS devices (
     enroll_ip           TEXT,               -- true client IP at enrollment (audit)
     revoked             INTEGER NOT NULL DEFAULT 0,
     log_titles          INTEGER NOT NULL DEFAULT 1, -- 0 = drop window titles on ingest (privacy, §9)
+    clock_skew_seconds  INTEGER,            -- last agent-minus-server clock offset (NULL until the agent reports client_now)
     created_at          INTEGER NOT NULL
 );
 
@@ -133,6 +134,7 @@ func OpenStore(path string) (*Store, error) {
 		`ALTER TABLE devices ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE devices ADD COLUMN log_titles INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE devices ADD COLUMN agent_build INTEGER`,
+		`ALTER TABLE devices ADD COLUMN clock_skew_seconds INTEGER`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -264,13 +266,16 @@ func (s *Store) DeviceByToken(apiToken string) (int64, error) {
 
 // TouchDevice updates liveness fields for an authenticated device. An empty
 // hostname leaves the stored value untouched (COALESCE), so a sparse ingest
-// never blanks it.
-func (s *Store) TouchDevice(id int64, hostname, version string, build, now int64) error {
+// never blanks it. skew carries the agent-minus-server clock offset when the
+// agent reported its wall-clock; an invalid skew keeps the last-known value
+// (older agents don't send client_now, §8 clock-skew flag).
+func (s *Store) TouchDevice(id int64, hostname, version string, build int64, skew sql.NullInt64, now int64) error {
 	_, err := s.db.Exec(`
 		UPDATE devices SET last_seen = ?, agent_version = ?, agent_build = ?,
-		    hostname = COALESCE(NULLIF(?, ''), hostname)
+		    hostname = COALESCE(NULLIF(?, ''), hostname),
+		    clock_skew_seconds = COALESCE(?, clock_skew_seconds)
 		WHERE id = ?`,
-		now, version, build, hostname, id)
+		now, version, build, hostname, skew, id)
 	return err
 }
 
@@ -341,17 +346,18 @@ func (s *Store) DeleteDevice(uuid string) (int64, error) {
 
 const deviceStatusCols = `device_uuid, name, COALESCE(hostname, ''), COALESCE(last_seen, 0),
 	COALESCE(agent_version, ''), COALESCE(agent_build, 0), api_token_hash IS NOT NULL, revoked,
-	enroll_expires, COALESCE(enrolled_at, 0), log_titles`
+	enroll_expires, COALESCE(enrolled_at, 0), log_titles, clock_skew_seconds`
 
 func scanDeviceStatus(sc interface{ Scan(...any) error }, now int64) (shared.DeviceStatus, error) {
 	var d shared.DeviceStatus
 	var apiSet, revoked, logTitles int
-	var enrollExpires sql.NullInt64
+	var enrollExpires, clockSkew sql.NullInt64
 	if err := sc.Scan(&d.DeviceUUID, &d.Name, &d.Hostname, &d.LastSeen,
-		&d.AgentVersion, &d.AgentBuild, &apiSet, &revoked, &enrollExpires, &d.EnrolledAt, &logTitles); err != nil {
+		&d.AgentVersion, &d.AgentBuild, &apiSet, &revoked, &enrollExpires, &d.EnrolledAt, &logTitles, &clockSkew); err != nil {
 		return d, err
 	}
 	d.LogTitles = logTitles != 0
+	d.ClockSkew, d.ClockSkewKnown = clockSkew.Int64, clockSkew.Valid
 	switch {
 	case revoked != 0:
 		d.Status = "revoked"

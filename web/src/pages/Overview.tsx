@@ -9,7 +9,7 @@ import {
   useTrend,
   type DeviceSummary,
 } from "../lib/api";
-import { fmtMinutes, ago, online } from "../lib/format";
+import { fmtMinutes, ago, online, fmtClockSkew, CLOCK_SKEW_FLAG_SECONDS } from "../lib/format";
 import { RangeSwitcher, type RangeKey } from "../components/RangeSwitcher";
 import { Kpi } from "../components/Kpi";
 import { CardSection } from "../components/ui/card";
@@ -146,6 +146,14 @@ function DeviceTable({
                   title={`This agent (build ${status.agent_build}) is behind the latest release (build ${latestBuild}). It should self-update within a few minutes.`}
                 >
                   update pending
+                </span>
+              )}
+              {status.clock_skew_known && Math.abs(status.clock_skew) >= CLOCK_SKEW_FLAG_SECONDS && (
+                <span
+                  className="shrink-0 rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-medium text-rose-600 dark:text-rose-400"
+                  title={`This device's clock is ${fmtClockSkew(status.clock_skew)} relative to the server. Large skew distorts when its activity is recorded; check the machine's time sync.`}
+                >
+                  clock {fmtClockSkew(status.clock_skew)}
                 </span>
               )}
             </div>
