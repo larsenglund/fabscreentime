@@ -135,6 +135,14 @@ type DeviceStatus struct {
 	ClockSkewKnown bool   `json:"clock_skew_known"` // false = the agent has never reported its wall-clock (old agent / not yet seen)
 }
 
+// DeviceEvent is one row of a device's audit trail — currently agent build
+// transitions ("updated"/"downgrade"), for the self-update audit log (§8).
+type DeviceEvent struct {
+	TS     int64  `json:"ts"`
+	Kind   string `json:"kind"`
+	Detail string `json:"detail"`
+}
+
 // LatestAgent describes the current published agent release, so the dashboard can
 // flag devices running behind it.
 type LatestAgent struct {

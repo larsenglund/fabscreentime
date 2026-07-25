@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -382,6 +383,50 @@ func TestClockSkewObservedOnIngest(t *testing.T) {
 	mustJSON(t, doJSON(t, h, http.MethodGet, "/api/devices/"+uuid, "", nil).Body.Bytes(), &d)
 	if !d.ClockSkewKnown || d.ClockSkew != 300 {
 		t.Fatalf("clock_skew after skewless ingest = %d (known=%v), want +300 retained", d.ClockSkew, d.ClockSkewKnown)
+	}
+}
+
+// TestSelfUpdateAuditLog covers §8 tamper-evidence: a build change on ingest is
+// recorded as an "updated" event, a backwards move as a "downgrade", and the
+// first-ever check-in logs nothing.
+func TestSelfUpdateAuditLog(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	srv, _ := newTestServer(t, now)
+	h := srv.Handler()
+	uuid, token := enrollDevice(t, h, "updater")
+
+	ingestBuild := func(ver string, build int64) {
+		doIngest(t, h, token, shared.IngestRequest{
+			AgentVersion: ver, AgentBuild: build,
+			Samples: []shared.Sample{{ClientTS: now.Unix(), MonitorOn: 1, Exe: "a.exe"}},
+		})
+	}
+	events := func() []shared.DeviceEvent {
+		var out struct {
+			Events []shared.DeviceEvent `json:"events"`
+		}
+		mustJSON(t, doJSON(t, h, http.MethodGet, "/api/devices/"+uuid+"/events", "", nil).Body.Bytes(), &out)
+		return out.Events
+	}
+
+	ingestBuild("0.6.0", 5) // first check-in: no prior build → no event
+	if len(events()) != 0 {
+		t.Fatalf("first check-in should log no event, got %d", len(events()))
+	}
+	ingestBuild("0.6.0", 5) // same build → no event
+	ingestBuild("0.7.0", 6) // forward → "updated"
+	ingestBuild("0.5.0", 4) // backward → "downgrade"
+
+	ev := events()
+	if len(ev) != 2 {
+		t.Fatalf("want 2 events, got %d: %+v", len(ev), ev)
+	}
+	// Newest first: the downgrade, then the update.
+	if ev[0].Kind != "downgrade" || ev[1].Kind != "updated" {
+		t.Fatalf("event kinds = [%s, %s], want [downgrade, updated]", ev[0].Kind, ev[1].Kind)
+	}
+	if !strings.Contains(ev[1].Detail, "build 5") || !strings.Contains(ev[1].Detail, "build 6") {
+		t.Fatalf("update detail = %q, want the 5→6 transition", ev[1].Detail)
 	}
 }
 

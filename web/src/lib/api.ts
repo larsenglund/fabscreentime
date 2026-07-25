@@ -32,6 +32,12 @@ export interface LatestAgent {
   build: number;
 }
 
+export interface DeviceEvent {
+  ts: number;
+  kind: string; // "updated" | "downgrade"
+  detail: string;
+}
+
 export interface TrendPoint {
   day: string;
   monitor_minutes: number;
@@ -138,6 +144,14 @@ export function useSignals(uuid: string, range: string) {
   return useQuery({
     queryKey: ["signals", uuid, range],
     queryFn: () => getJSON<{ signals: SignalDay[] }>(`/api/devices/${uuid}/signals?range=${range}`),
+    refetchInterval: LIVE,
+  });
+}
+
+export function useDeviceEvents(uuid: string) {
+  return useQuery({
+    queryKey: ["events", uuid],
+    queryFn: () => getJSON<{ events: DeviceEvent[] }>(`/api/devices/${uuid}/events`),
     refetchInterval: LIVE,
   });
 }

@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -92,6 +94,17 @@ CREATE TABLE IF NOT EXISTS daily_app_stats (
     monitor_minutes INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (device_id, day, exe_name)
 );
+
+-- Append-only audit of notable per-device events, primarily agent self-updates
+-- (and downgrades, which should never happen — a tamper signal). §8.
+CREATE TABLE IF NOT EXISTS device_events (
+    id        INTEGER PRIMARY KEY,
+    device_id INTEGER NOT NULL REFERENCES devices(id),
+    ts        INTEGER NOT NULL,
+    kind      TEXT NOT NULL,              -- 'updated' | 'downgrade'
+    detail    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_device_events ON device_events(device_id, ts);
 `
 
 // Store wraps the SQLite database.
@@ -270,13 +283,46 @@ func (s *Store) DeviceByToken(apiToken string) (int64, error) {
 // agent reported its wall-clock; an invalid skew keeps the last-known value
 // (older agents don't send client_now, §8 clock-skew flag).
 func (s *Store) TouchDevice(id int64, hostname, version string, build int64, skew sql.NullInt64, now int64) error {
-	_, err := s.db.Exec(`
+	// Capture the prior build so a change in it can be recorded as a self-update
+	// event (tamper-evidence, §8). Cheap: one indexed lookup on a tiny table.
+	var oldBuild sql.NullInt64
+	var oldVer sql.NullString
+	_ = s.db.QueryRow(`SELECT agent_build, agent_version FROM devices WHERE id = ?`, id).Scan(&oldBuild, &oldVer)
+
+	if _, err := s.db.Exec(`
 		UPDATE devices SET last_seen = ?, agent_version = ?, agent_build = ?,
 		    hostname = COALESCE(NULLIF(?, ''), hostname),
 		    clock_skew_seconds = COALESCE(?, clock_skew_seconds)
 		WHERE id = ?`,
-		now, version, build, hostname, skew, id)
-	return err
+		now, version, build, hostname, skew, id); err != nil {
+		return err
+	}
+
+	// Log a build transition only when there was a prior build to compare against
+	// (skip the first-ever check-in). A backwards move is a downgrade — an agent
+	// should never self-update to a lower build, so it's flagged distinctly.
+	if build != 0 && oldBuild.Valid && oldBuild.Int64 != 0 && oldBuild.Int64 != build {
+		kind := "updated"
+		if build < oldBuild.Int64 {
+			kind = "downgrade"
+		}
+		detail := fmt.Sprintf("%s (build %d) → %s (build %d)",
+			orDash(oldVer.String), oldBuild.Int64, orDash(version), build)
+		if _, err := s.db.Exec(
+			`INSERT INTO device_events (device_id, ts, kind, detail) VALUES (?, ?, ?, ?)`,
+			id, now, kind, detail); err != nil {
+			log.Printf("record device event: %v", err) // best-effort audit; never fail ingest
+		}
+	}
+	return nil
+}
+
+// orDash renders an empty version string as "?" for readable audit detail.
+func orDash(v string) string {
+	if v == "" {
+		return "?"
+	}
+	return v
 }
 
 // SetRevoked flips a device's revoked flag by UUID. A revoked device's next
@@ -332,6 +378,7 @@ func (s *Store) DeleteDevice(uuid string) (int64, error) {
 		`DELETE FROM monitor_events WHERE device_id = ?`,
 		`DELETE FROM daily_stats WHERE device_id = ?`,
 		`DELETE FROM daily_app_stats WHERE device_id = ?`,
+		`DELETE FROM device_events WHERE device_id = ?`,
 		`DELETE FROM devices WHERE id = ?`,
 	} {
 		if _, err := tx.Exec(stmt, id); err != nil {
@@ -393,6 +440,33 @@ func (s *Store) DeviceStatuses(now int64) ([]shared.DeviceStatus, error) {
 func (s *Store) DeviceStatusByUUID(uuid string, now int64) (shared.DeviceStatus, error) {
 	row := s.db.QueryRow(`SELECT `+deviceStatusCols+` FROM devices WHERE device_uuid = ?`, uuid)
 	return scanDeviceStatus(row, now)
+}
+
+// DeviceEvents returns a device's audit events (newest first), for the "update
+// history" panel. An unknown UUID yields an empty slice, not an error.
+func (s *Store) DeviceEvents(uuid string, limit int) ([]shared.DeviceEvent, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT e.ts, e.kind, e.detail
+		FROM device_events e JOIN devices d ON d.id = e.device_id
+		WHERE d.device_uuid = ?
+		ORDER BY e.ts DESC, e.id DESC
+		LIMIT ?`, uuid, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []shared.DeviceEvent
+	for rows.Next() {
+		var e shared.DeviceEvent
+		if err := rows.Scan(&e.TS, &e.Kind, &e.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // Close closes the database.

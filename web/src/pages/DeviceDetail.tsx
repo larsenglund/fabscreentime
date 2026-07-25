@@ -1,8 +1,24 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useDevice, useHeatmap, usePatchDevice, useSignals, useTimeline, useTopApps } from "../lib/api";
-import { fmtMinutes, ago, todayUTC, shiftDay, fmtClockSkew, CLOCK_SKEW_FLAG_SECONDS } from "../lib/format";
+import {
+  useDevice,
+  useDeviceEvents,
+  useHeatmap,
+  usePatchDevice,
+  useSignals,
+  useTimeline,
+  useTopApps,
+} from "../lib/api";
+import {
+  fmtMinutes,
+  ago,
+  todayUTC,
+  shiftDay,
+  fmtClockSkew,
+  fmtDate,
+  CLOCK_SKEW_FLAG_SECONDS,
+} from "../lib/format";
 import { Kpi } from "../components/Kpi";
 import { CardSection } from "../components/ui/card";
 import { StatusBadge } from "../components/ui/badge";
@@ -21,6 +37,7 @@ export function DeviceDetail() {
   const topApps = useTopApps(uuid, range);
   const signals = useSignals(uuid, "7d");
   const heatmap = useHeatmap(uuid, 14);
+  const eventsQ = useDeviceEvents(uuid);
   const patch = usePatchDevice();
 
   const hours = timeline.data?.hours ?? [];
@@ -46,6 +63,7 @@ export function DeviceDetail() {
             <span>
               {d.hostname && <>{d.hostname} · </>}
               {d.agent_version && <>agent {d.agent_version} · </>}
+              {d.enrolled_at > 0 && <>enrolled {fmtDate(d.enrolled_at)} · </>}
               {ago(d.last_seen)}
             </span>
             {d.clock_skew_known && Math.abs(d.clock_skew) >= CLOCK_SKEW_FLAG_SECONDS && (
@@ -131,6 +149,39 @@ export function DeviceDetail() {
           <Skeleton className="h-48 w-full" />
         ) : (
           <Heatmap days={heatmap.data?.heatmap ?? []} />
+        )}
+      </CardSection>
+
+      <CardSection
+        title="Update history"
+        action={<span className="text-xs text-muted-foreground">agent self-updates</span>}
+      >
+        {eventsQ.isLoading ? (
+          <Skeleton className="h-16 w-full" />
+        ) : !eventsQ.data?.events.length ? (
+          <p className="text-sm text-muted-foreground">
+            No agent updates recorded yet. Entries appear here whenever this device's agent build
+            changes — a build moving <em>backwards</em> is flagged as a downgrade.
+          </p>
+        ) : (
+          <ol className="space-y-2">
+            {eventsQ.data.events.map((e, i) => (
+              <li key={i} className="flex items-baseline gap-2 text-sm">
+                <span
+                  className={
+                    "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium " +
+                    (e.kind === "downgrade"
+                      ? "bg-rose-500/15 text-rose-600 dark:text-rose-400"
+                      : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400")
+                  }
+                >
+                  {e.kind}
+                </span>
+                <span className="min-w-0 flex-1 break-words">{e.detail}</span>
+                <span className="tnum shrink-0 text-xs text-muted-foreground">{ago(e.ts)}</span>
+              </li>
+            ))}
+          </ol>
         )}
       </CardSection>
 

@@ -46,6 +46,17 @@ export function todayUTC(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** fmtDate renders a unix-seconds timestamp as a short absolute date
+ *  ("20 Jul 2026"), for enrollment/registry context. */
+export function fmtDate(ts: number): string {
+  if (!ts) return "—";
+  return new Date(ts * 1000).toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
 /** shiftDay returns dayStr (YYYY-MM-DD) offset by n days. */
 export function shiftDay(dayStr: string, n: number): string {
   const d = new Date(dayStr + "T00:00:00Z");

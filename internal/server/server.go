@@ -139,6 +139,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/devices/{uuid}/top-apps", s.handleTopApps)
 	mux.HandleFunc("GET /api/devices/{uuid}/signals", s.handleSignals)
 	mux.HandleFunc("GET /api/devices/{uuid}/heatmap", s.handleHeatmap)
+	mux.HandleFunc("GET /api/devices/{uuid}/events", s.handleDeviceEvents)
 	// Infra.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// Everything else is the embedded SPA (static assets + client-side routes).
@@ -402,6 +403,19 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, d)
+}
+
+func (s *Server) handleDeviceEvents(w http.ResponseWriter, r *http.Request) {
+	events, err := s.store.DeviceEvents(r.PathValue("uuid"), 50)
+	if err != nil {
+		log.Printf("device events: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if events == nil {
+		events = []shared.DeviceEvent{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
 }
 
 func (s *Server) handleDevicePatch(w http.ResponseWriter, r *http.Request) {
