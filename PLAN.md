@@ -915,6 +915,18 @@ tool into something genuinely dangerous.
 Each phase is independently verifiable and keeps the system runnable. Don't enroll a second
 machine until Phase 1's update security exists.
 
+> **Build status (2026-07-25): all phases below (0–8) are implemented, tested, and deployed.**
+> The backend runs in production on the household Alpine VM and a small fleet of Windows agents
+> self-updates against it. Two things in the plan were **deliberately not built** (rationale in
+> [STATUS.md §3](./STATUS.md)): (a) **external reachability** — the Cloudflare Tunnel + Access of
+> §8.2 needs an interactive Cloudflare login, so the backend is **LAN-only** and the dashboard has
+> no auth of its own; and (b) **revoke → agent self-uninstall** (Phase 8's verify line) — a naive
+> "401 ⇒ delete myself" could brick the fleet on a transient error, so revocation stays
+> server-side only. Smaller conscious deferrals (per-user attribution, purge/`VACUUM`, backup
+> at-rest encryption, a second rotation signing key, the DPMS pump, VM NTP) are also listed there.
+> Live status, deploy/DR, and the local run/release guide: [STATUS.md](./STATUS.md) and
+> [deploy/RUNBOOK.md](./deploy/RUNBOOK.md).
+
 ### Phase 0 — Walking skeleton + validate the core premise
 - **Signal-validation spike (§0.1) — do this before anything else, it is the gating risk.** A
   ~30-line probe on one real household PC logging **all three** candidate signals once a second —

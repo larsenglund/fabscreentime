@@ -6,8 +6,9 @@ Go backend on a Proxmox server stores it and serves a responsive dashboard that 
 every enrolled machine. New machines enroll from the website.
 
 > The full development plan — architecture, tech stack, data model, security model, and a phased
-> roadmap — is in **[PLAN.md](./PLAN.md)**. Phases 0–2 are implemented and tested. For running and
-> testing locally on Windows (and continuing the work), see **[HANDOFF.md](./HANDOFF.md)**.
+> roadmap — is in **[PLAN.md](./PLAN.md)**. All roadmap phases (0–8) are implemented, tested, and
+> deployed. For current status and how to run/develop/release it on Windows, see
+> **[STATUS.md](./STATUS.md)**; for production deploy/DR, see **[deploy/RUNBOOK.md](./deploy/RUNBOOK.md)**.
 
 ## The one idea to know
 
@@ -49,7 +50,7 @@ cmd/agent            Windows agent (stub sampler on non-Windows so it runs on CI
 cmd/montest          Phase 0 monitor-signal probe (Windows-only) — see PLAN.md §0.1
 internal/shared      JSON contract shared by agent and backend
 internal/agent       platform-neutral agent core, Sampler interface, bounded queue, uploader
-internal/server      HTTP handlers, SQLite store, placeholder dashboard
+internal/server      HTTP handlers, SQLite store, rollups; serves the embedded dashboard
 ```
 
 The agent's hard logic sits behind a `Sampler` interface with a real Win32 implementation
@@ -64,9 +65,10 @@ go run ./cmd/fabscreentimed        # backend on :8080, SQLite at ./fabscreentime
 go run ./cmd/agent -server http://localhost:8080 -interval 5s   # stub agent → backend
 ```
 
-Open <http://localhost:8080> for the placeholder dashboard. `scripts/build.sh [version]` produces
-the Linux backend plus the silent (`-H=windowsgui`) Windows `agent.exe` and `montest.exe` in
-`dist/`.
+Open <http://localhost:8080> for the embedded React dashboard (`web/dist` is committed, so the
+backend builds without Node). `scripts/build.sh [version]` produces the Linux backend plus the
+silent (`-H=windowsgui`) Windows `agent.exe` and `montest.exe` in `dist/`. Windows-specific
+toolchain notes (Go path, Node 22, SSH push) are in [STATUS.md §5](./STATUS.md).
 
 ### Phase 0: validate the monitor signal first
 
@@ -102,20 +104,14 @@ Drop `agent.exe` + `manifest.json` into the backend's `-agentdir`; it serves the
 
 ### Status
 
-- **Phase 0 (walking skeleton):** agent sampling + bounded offline queue, batched idempotent
-  ingest with timestamp clamping, per-device summary, a no-build placeholder dashboard, CI that runs
-  the real Win32 code on a Windows runner.
-- **Phase 1 (signed auto-update firebreak):** Ed25519-signed manifests, dual pinned keys, monotonic
-  anti-rollback, same-origin download enforcement, fail-closed verify-before-swap, offline signing
-  CLI. Tested end to end (valid update applies; tampered / unsigned / downgrade / off-origin /
-  wrong-hash all rejected before the binary is touched).
-- **Phase 2 (monitor signal + silent autostart):** connection-based monitor detection
-  (`GetSystemMetrics(SM_CMONITORS)`, polled — the primary physical-power-off signal, no message pump
-  needed), a transition poller emitting exact on/off `monitor_events`, exact-interval monitor-on
-  minutes (capped at now), the nightly **dirty-days** rollup engine (`daily_stats` /
-  `daily_app_stats`), and hidden per-user "at logon" Scheduled-Task autostart (`agent -install` /
-  `-uninstall`). *Deferred pending on-hardware validation:* the display-power (DPMS) message-pump
-  watcher — until then `display_power` is unknown and `monitor_on` falls back to the connection
-  count, which is exactly the signal that detects a physical power-off.
+**All roadmap phases (0–8) are implemented, tested, and deployed.** The backend runs in production
+on the household Alpine VM (LAN-only) and a small fleet of Windows agents enrolls, reports, and
+silently self-updates against it. Highlights: signed fail-closed auto-update (tampered / unsigned /
+downgrade / off-origin / wrong-hash all rejected before the binary is touched), the validated
+DDC/dxva2 monitor-off signal, per-device tokens + enrollment, an embedded React dashboard, one-click
+website install, crash-loop auto-rollback, offline/dead-man alerts, and Phase-8 tamper-evidence
+(behind-latest + clock-skew flags, self-update audit log).
 
-Next: Phase 3 (auth, enrollment & per-device tokens) — see the roadmap in [PLAN.md §10](./PLAN.md).
+The current status, deliberate deferrals (notably external reachability / dashboard auth), and the
+local run/develop/release guide live in **[STATUS.md](./STATUS.md)**; the roadmap and design
+rationale are in [PLAN.md §10](./PLAN.md).
