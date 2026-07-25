@@ -16,6 +16,16 @@ services:
     image: fabscreentimed:latest
     container_name: fabscreentimed
     restart: unless-stopped
+    # Observability is off until configured (PLAN.md §7.5). Set in a .env beside
+    # this file: FST_ALERT_WEBHOOK (ntfy-compatible URL for offline-device alerts)
+    # and FST_DEADMAN_URL (e.g. a healthchecks.io ping URL).
+    command:
+      - "-addr=:8080"
+      - "-db=/var/lib/fabscreentime/data.db"
+      - "-agentdir=/srv/agent"
+      - "-alert-webhook=${FST_ALERT_WEBHOOK:-}"
+      - "-offline-after=${FST_OFFLINE_AFTER:-15m}"
+      - "-deadman-url=${FST_DEADMAN_URL:-}"
     ports:
       - "${FST_BIND:-0.0.0.0}:${FST_PORT:-8090}:8080"
     volumes:
