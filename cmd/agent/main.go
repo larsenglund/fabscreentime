@@ -97,6 +97,22 @@ func main() {
 	}
 	hostname, _ := os.Hostname()
 
+	// Crash-loop auto-rollback (PLAN.md §5.4): if this build has restarted several
+	// times without ever checking in, it's a bad update — restore the previous
+	// binary and relaunch, quarantining the bad build so it isn't re-applied.
+	startup := agent.EvaluateStartup(*dataDir, build, time.Now().Unix())
+	if startup.Rollback {
+		log.Printf("build %d crash-looped before check-in; rolling back to previous version", build)
+		if exe, e := os.Executable(); e == nil {
+			if err := agent.RollbackToOld(exe); err != nil {
+				log.Printf("rollback: nothing to restore (%v); staying on current", err)
+			} else {
+				log.Print("restored previous agent; relaunching")
+				agent.Relaunch(exe) // exits this process
+			}
+		}
+	}
+
 	queue, err := agent.NewQueue(fpJoin(*dataDir, "queue.json"), 0)
 	if err != nil {
 		log.Fatalf("queue: %v", err)
@@ -105,17 +121,18 @@ func main() {
 	// Self-update is enabled only if keys are pinned (fail-closed, PLAN.md §5.3).
 	var updater agent.Updater
 	if keys := agent.PinnedUpdateKeys(); len(keys) > 0 {
-		updater = agent.NewSelfUpdater(serverURL, build, keys)
+		updater = agent.NewSelfUpdater(serverURL, build, startup.Quarantined, keys)
 	} else {
 		log.Print("no pinned update keys compiled in — self-update disabled")
 	}
 
 	a := agent.New(agent.Config{
-		DeviceUUID:   creds.DeviceUUID,
-		Hostname:     hostname,
-		AgentVersion: Version,
-		Build:        build,
-		Interval:     *interval,
+		DeviceUUID:     creds.DeviceUUID,
+		Hostname:       hostname,
+		AgentVersion:   Version,
+		Build:          build,
+		Interval:       *interval,
+		OnFirstCheckIn: func() { agent.MarkCheckedIn(*dataDir, build) },
 	}, agent.NewSampler(), queue, agent.NewHTTPUploader(serverURL, creds.APIToken), updater)
 
 	log.Printf("agent %s (build %d) starting: device=%s host=%s server=%s interval=%s",

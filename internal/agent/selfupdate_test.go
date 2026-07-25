@@ -51,7 +51,7 @@ func TestDownload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	u := NewSelfUpdater(srv.URL, 1, nil)
+	u := NewSelfUpdater(srv.URL, 1, 0, nil)
 	got, err := u.download(context.Background(), "/agent/download")
 	if err != nil {
 		t.Fatalf("download: %v", err)

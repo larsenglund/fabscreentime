@@ -49,7 +49,7 @@ func TestSelfUpdateEndToEnd(t *testing.T) {
 	}
 
 	newUpdater := func(currentBuild int64) *SelfUpdater {
-		return NewSelfUpdater(srv.URL, currentBuild, pinned)
+		return NewSelfUpdater(srv.URL, currentBuild, 0, pinned)
 	}
 
 	// Fresh temp "exe" per case.

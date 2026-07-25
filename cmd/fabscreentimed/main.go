@@ -22,6 +22,9 @@ func main() {
 	dbPath := flag.String("db", "fabscreentime.db", "path to the SQLite database")
 	agentDir := flag.String("agentdir", "", "directory holding the signed agent release (manifest.json + agent.exe)")
 	rollupEvery := flag.Duration("rollup", time.Hour, "how often to recompute dirty daily rollups")
+	alertWebhook := flag.String("alert-webhook", "", "ntfy-compatible URL for offline-device push alerts (empty = off)")
+	offlineAfter := flag.Duration("offline-after", 15*time.Minute, "silence before a reporting device is called offline")
+	deadmanURL := flag.String("deadman-url", "", "external monitor to ping every minute (e.g. healthchecks.io) so backend death is noticed")
 	flag.Parse()
 
 	store, err := server.OpenStore(*dbPath)
@@ -38,6 +41,12 @@ func main() {
 	// would otherwise drop rollups for days ingested just before shutdown.
 	app.CatchUpRollups(3)
 	app.StartRollupLoop(ctx, *rollupEvery)
+
+	// Observability (PLAN.md §7.5): push an alert when a device goes silent, and
+	// ping an external dead-man's switch so this backend's own death is noticed.
+	app.EnableAlerts(*alertWebhook, *offlineAfter)
+	app.StartAlertLoop(ctx, time.Minute)
+	app.StartDeadManLoop(ctx, *deadmanURL, time.Minute)
 
 	srv := &http.Server{
 		Addr:              *addr,

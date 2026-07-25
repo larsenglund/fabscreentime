@@ -71,12 +71,34 @@ func Install(serverURL string) error {
 	return nil
 }
 
-// Uninstall stops and removes the Scheduled Task. The installed exe and data dir
-// are left in place (self-deleting a running exe is the rename-self problem);
-// remove %LOCALAPPDATA%\FabScreenTime manually to fully clean up.
+// Uninstall stops and removes the Scheduled Task, deletes the data files, and
+// schedules deletion of the exe + install dir (PLAN.md §5.5). A running exe
+// can't delete itself (the rename-self problem), so the exe and directory are
+// removed by a short detached cmd that waits for handles to release.
 func Uninstall() error {
 	_ = runSchtasks("/End", "/TN", taskName)
-	return runSchtasks("/Delete", "/TN", taskName, "/F")
+	if err := runSchtasks("/Delete", "/TN", taskName, "/F"); err != nil {
+		return err
+	}
+	dir := InstallDir()
+	// Data files first (not write-locked), so they're gone even if the exe/dir
+	// removal is delayed.
+	for _, f := range []string{"credentials.json", "queue.json", "agent.log", "update-state.json", "enroll.json", "task.xml"} {
+		_ = os.Remove(filepath.Join(dir, f))
+	}
+	scheduleCleanup(dir)
+	return nil
+}
+
+// scheduleCleanup spawns a detached cmd that waits briefly (for the stopped task
+// and this process to release handles), then deletes the agent exe and the dir.
+func scheduleCleanup(dir string) {
+	script := fmt.Sprintf(
+		`ping -n 3 127.0.0.1 >nul & del /f /q "%s\agent.exe" "%s\agent.exe.old" >nul 2>nul & rmdir /s /q "%s" >nul 2>nul`,
+		dir, dir, dir)
+	cmd := exec.Command("cmd.exe", "/c", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000} // CREATE_NO_WINDOW
+	_ = cmd.Start()
 }
 
 func runSchtasks(args ...string) error {
@@ -114,7 +136,7 @@ func buildTaskXML(userID, command, arguments string) string {
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>false</AllowHardTerminate>
+    <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
     <Enabled>true</Enabled>
     <Hidden>true</Hidden>

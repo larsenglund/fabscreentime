@@ -1,0 +1,90 @@
+name: Release
+
+# Tag-triggered release (PLAN.md §8.5): build the dashboard, embed it, build the
+# Linux backend and the silent Windows agent, scan deps, and publish artifacts to
+# the GitHub Release. Signing is OPTIONAL and off by default — the update-signing
+# key is meant to stay offline (§5.3), so the maintainer normally signs locally
+# with scripts/release-local.ps1 and attaches the signed manifest. If you accept
+# the trade-off, set the repo secret FST_SIGN_KEY to the hex private key and this
+# workflow will sign in CI.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build dashboard
+        working-directory: web
+        run: npm ci && npm run build
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet & test
+        run: |
+          go vet ./...
+          go test ./... -count=1
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+      - name: Build backend (linux, embedded dashboard)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -ldflags "-s -w -X main.Version=${GITHUB_REF_NAME}" \
+            -o dist/fabscreentimed ./cmd/fabscreentimed
+
+      - name: Build silent agent (windows)
+        run: |
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+            go build -ldflags "-s -w -H=windowsgui -X main.Version=${GITHUB_REF_NAME}" \
+            -o dist/agent.exe ./cmd/agent
+
+      - name: Sign agent (only if FST_SIGN_KEY is configured)
+        env:
+          FST_SIGN_KEY: ${{ secrets.FST_SIGN_KEY }}
+        run: |
+          if [ -z "$FST_SIGN_KEY" ]; then
+            echo "No FST_SIGN_KEY secret — skipping signing (sign offline with release-local.ps1)."
+            exit 0
+          fi
+          printf '%s' "$FST_SIGN_KEY" > release.key
+          BUILD=$(date +%s)
+          go run ./cmd/fst-sign sign -key release.key \
+            -in dist/agent.exe -version "${GITHUB_REF_NAME}" -build "$BUILD" \
+            -out dist/manifest.json
+          rm -f release.key
+          echo "Signed ${GITHUB_REF_NAME} (build $BUILD)."
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/fabscreentimed
+            dist/agent.exe
+            dist/manifest.json
+          fail_on_unmatched_files: false
+          body: |
+            FabScreenTime ${{ github.ref_name }}
+
+            - `agent.exe` — the silent Windows agent (out-of-band first-install source, §5.3-5).
+            - `fabscreentimed` — the Linux backend with the dashboard embedded.
+            - `manifest.json` — present only if the release was signed in CI.
+
+            If unsigned here, sign the agent offline (`scripts/release-local.ps1`) and
+            attach the resulting `manifest.json` for out-of-band verification.

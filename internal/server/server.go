@@ -43,10 +43,15 @@ type Server struct {
 	distFS fs.FS        // embedded SPA build (may be nil if the embed failed)
 	spa    http.Handler // static file server over distFS
 
+	notifier     Notifier      // offline-device alerts (nil = disabled)
+	offlineAfter time.Duration // silence before a device is called offline
+
 	mu          sync.Mutex
 	dirty       map[dirtyKey]bool      // (device, day) pairs whose rollup is stale
 	manifest    *shared.SignedManifest // current signed release (hot-reloaded on mtime change)
 	manifestMod time.Time              // mtime of the manifest last loaded
+	alerted     map[string]bool        // device UUIDs currently in the "offline" alert state
+	alertSeeded bool                   // first offline pass done (seed, don't alert)
 }
 
 // New returns a Server backed by store. agentDir, if non-empty, is scanned for a
@@ -57,6 +62,8 @@ func New(store *Store, agentDir string) *Server {
 		now:           time.Now,
 		agentDir:      agentDir,
 		dirty:         map[dirtyKey]bool{},
+		alerted:       map[string]bool{},
+		offlineAfter:  15 * time.Minute,
 		enrollLimiter: newRateLimiter(10, 60), // 10 enroll attempts / minute / IP
 	}
 	if m := s.currentManifest(); m != nil {
@@ -246,6 +253,17 @@ func (s *Server) CatchUpRollups(days int) {
 	s.mu.Unlock()
 	log.Printf("rollup catch-up: recomputing %d device-days", len(pairs))
 	s.RunRollups()
+}
+
+// EnableAlerts turns on offline-device push alerts to an ntfy-compatible webhook.
+// A zero offlineAfter keeps the default. No-op notifier when webhookURL is empty.
+func (s *Server) EnableAlerts(webhookURL string, offlineAfter time.Duration) {
+	if webhookURL != "" {
+		s.notifier = newNtfyNotifier(webhookURL)
+	}
+	if offlineAfter > 0 {
+		s.offlineAfter = offlineAfter
+	}
 }
 
 // StartRollupLoop runs RunRollups on interval until ctx is cancelled.

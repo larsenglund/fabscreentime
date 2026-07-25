@@ -33,6 +33,9 @@ type Config struct {
 	Interval     time.Duration
 	MonitorPoll  time.Duration    // how often to poll for monitor on/off transitions
 	Now          func() time.Time // injectable for tests
+	// OnFirstCheckIn fires once after the first successful upload — used to commit
+	// a freshly-updated build so a later restart isn't mistaken for a crash (§5.4).
+	OnFirstCheckIn func()
 }
 
 // Agent samples once per interval, buffers to a bounded queue, and flushes the
@@ -48,6 +51,7 @@ type Agent struct {
 	mu            sync.Mutex
 	pendingEvents []shared.MonitorEvent
 	lastMonitorOn int // -1 unknown, else last observed composite state
+	checkedIn     bool
 }
 
 // New wires an agent together. updater may be nil to disable self-update.
@@ -190,6 +194,14 @@ func (a *Agent) flush(ctx context.Context) {
 		log.Printf("ack error: %v", err)
 	}
 	a.ackEvents(len(events))
+
+	// First successful check-in commits this build (crash-loop guard, §5.4).
+	if !a.checkedIn {
+		a.checkedIn = true
+		if a.cfg.OnFirstCheckIn != nil {
+			a.cfg.OnFirstCheckIn()
+		}
+	}
 	if resp.ServerTime > 0 {
 		a.clockSkew = time.Duration(resp.ServerTime-a.cfg.Now().Unix()) * time.Second
 	}
