@@ -20,8 +20,14 @@ export interface DeviceStatus {
   status: "pending" | "active" | "expired" | "revoked";
   last_seen: number;
   agent_version: string;
+  agent_build: number;
   enrolled_at: number;
   log_titles: boolean;
+}
+
+export interface LatestAgent {
+  version: string;
+  build: number;
 }
 
 export interface TrendPoint {
@@ -89,7 +95,7 @@ export function useSummary(range: string) {
 export function useDevices() {
   return useQuery({
     queryKey: ["devices"],
-    queryFn: () => getJSON<{ devices: DeviceStatus[] }>(`/api/devices`),
+    queryFn: () => getJSON<{ devices: DeviceStatus[]; latest: LatestAgent | null }>(`/api/devices`),
     refetchInterval: LIVE,
   });
 }

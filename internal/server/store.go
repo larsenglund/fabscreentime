@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS devices (
     hostname            TEXT,
     last_seen           INTEGER,
     agent_version       TEXT,
+    agent_build         INTEGER,            -- monotonic build reported at ingest (behind-latest flag)
     monitor_detect_mode TEXT NOT NULL DEFAULT 'connection',
     api_token_hash      TEXT,               -- SHA-256 of the durable per-device token (NULL until enrolled)
     enroll_token_hash   TEXT,               -- SHA-256 of the one-time enrollment secret (NULL once consumed)
@@ -131,6 +132,7 @@ func OpenStore(path string) (*Store, error) {
 		`ALTER TABLE devices ADD COLUMN enroll_ip TEXT`,
 		`ALTER TABLE devices ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE devices ADD COLUMN log_titles INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE devices ADD COLUMN agent_build INTEGER`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -263,12 +265,12 @@ func (s *Store) DeviceByToken(apiToken string) (int64, error) {
 // TouchDevice updates liveness fields for an authenticated device. An empty
 // hostname leaves the stored value untouched (COALESCE), so a sparse ingest
 // never blanks it.
-func (s *Store) TouchDevice(id int64, hostname, version string, now int64) error {
+func (s *Store) TouchDevice(id int64, hostname, version string, build, now int64) error {
 	_, err := s.db.Exec(`
-		UPDATE devices SET last_seen = ?, agent_version = ?,
+		UPDATE devices SET last_seen = ?, agent_version = ?, agent_build = ?,
 		    hostname = COALESCE(NULLIF(?, ''), hostname)
 		WHERE id = ?`,
-		now, version, hostname, id)
+		now, version, build, hostname, id)
 	return err
 }
 
@@ -338,15 +340,15 @@ func (s *Store) DeleteDevice(uuid string) (int64, error) {
 }
 
 const deviceStatusCols = `device_uuid, name, COALESCE(hostname, ''), COALESCE(last_seen, 0),
-	COALESCE(agent_version, ''), api_token_hash IS NOT NULL, revoked, enroll_expires, COALESCE(enrolled_at, 0),
-	log_titles`
+	COALESCE(agent_version, ''), COALESCE(agent_build, 0), api_token_hash IS NOT NULL, revoked,
+	enroll_expires, COALESCE(enrolled_at, 0), log_titles`
 
 func scanDeviceStatus(sc interface{ Scan(...any) error }, now int64) (shared.DeviceStatus, error) {
 	var d shared.DeviceStatus
 	var apiSet, revoked, logTitles int
 	var enrollExpires sql.NullInt64
 	if err := sc.Scan(&d.DeviceUUID, &d.Name, &d.Hostname, &d.LastSeen,
-		&d.AgentVersion, &apiSet, &revoked, &enrollExpires, &d.EnrolledAt, &logTitles); err != nil {
+		&d.AgentVersion, &d.AgentBuild, &apiSet, &revoked, &enrollExpires, &d.EnrolledAt, &logTitles); err != nil {
 		return d, err
 	}
 	d.LogTitles = logTitles != 0

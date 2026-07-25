@@ -103,6 +103,7 @@ export function Overview() {
         ) : (
           <DeviceTable
             devices={devices.data.devices.map((d) => ({ status: d, metric: metricByUuid.get(d.device_uuid) }))}
+            latestBuild={devices.data.latest?.build ?? 0}
             onRevoke={revoke}
             onDelete={remove_}
           />
@@ -114,10 +115,12 @@ export function Overview() {
 
 function DeviceTable({
   devices,
+  latestBuild,
   onRevoke,
   onDelete,
 }: {
   devices: { status: import("../lib/api").DeviceStatus; metric?: DeviceSummary }[];
+  latestBuild: number;
   onRevoke: (uuid: string) => void;
   onDelete: (uuid: string, label: string) => void;
 }) {
@@ -132,9 +135,19 @@ function DeviceTable({
               </span>
               <StatusBadge device={status} />
             </Link>
-            <div className="mt-0.5 truncate text-xs text-muted-foreground">
-              {status.agent_version ? `agent ${status.agent_version} · ` : ""}
-              {ago(status.last_seen)}
+            <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span className="truncate">
+                {status.agent_version ? `agent ${status.agent_version} · ` : ""}
+                {ago(status.last_seen)}
+              </span>
+              {latestBuild > 0 && status.agent_build > 0 && status.agent_build < latestBuild && (
+                <span
+                  className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                  title={`This agent (build ${status.agent_build}) is behind the latest release (build ${latestBuild}). It should self-update within a few minutes.`}
+                >
+                  update pending
+                </span>
+              )}
             </div>
           </div>
           <div className="tnum hidden text-right text-sm sm:block">

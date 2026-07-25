@@ -166,7 +166,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.now().Unix()
-	if err := s.store.TouchDevice(id, req.Hostname, req.AgentVersion, now); err != nil {
+	if err := s.store.TouchDevice(id, req.Hostname, req.AgentVersion, req.AgentBuild, now); err != nil {
 		log.Printf("touch device: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
@@ -378,7 +378,13 @@ func (s *Server) handleDevices(w http.ResponseWriter, _ *http.Request) {
 	if list == nil {
 		list = []shared.DeviceStatus{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"devices": list})
+	// The latest published release lets the dashboard flag devices running behind
+	// it (tamper-evidence / "hasn't updated", §5.3 M4).
+	var latest *shared.LatestAgent
+	if m := s.currentManifest(); m != nil {
+		latest = &shared.LatestAgent{Version: m.Manifest.Version, Build: m.Manifest.Build}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"devices": list, "latest": latest})
 }
 
 func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {

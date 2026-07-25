@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -290,6 +291,61 @@ func TestDeleteDeviceRemovesEverything(t *testing.T) {
 	// Deleting an unknown UUID → 404.
 	if r := doJSON(t, h, http.MethodDelete, "/api/devices/does-not-exist", "", nil); r.Code != http.StatusNotFound {
 		t.Fatalf("delete unknown = %d, want 404", r.Code)
+	}
+}
+
+// TestBehindLatestFlag covers the §5.3 M4 "update pending" path: the agent's
+// build is stored on ingest and echoed in the device status, and /api/devices
+// reports the latest published release so the dashboard can flag laggards.
+func TestBehindLatestFlag(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	// A server that serves a signed release at build 7.
+	agentDir := t.TempDir()
+	manifest := shared.SignedManifest{Manifest: shared.Manifest{Version: "0.7.0", Build: 7}}
+	b, _ := json.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(agentDir, "manifest.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := OpenStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	srv := New(st, agentDir)
+	srv.now = func() time.Time { return now }
+	h := srv.Handler()
+
+	uuid, token := enrollDevice(t, h, "old-agent")
+	// Ingest from an agent still on build 5 — behind the published build 7.
+	if rec := doIngest(t, h, token, shared.IngestRequest{
+		AgentVersion: "0.5.0",
+		AgentBuild:   5,
+		Samples:      []shared.Sample{{ClientTS: now.Unix(), MonitorOn: 1, Exe: "a.exe"}},
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("ingest = %d", rec.Code)
+	}
+
+	// The device status carries the reported build.
+	var d shared.DeviceStatus
+	rec := doJSON(t, h, http.MethodGet, "/api/devices/"+uuid, "", nil)
+	mustJSON(t, rec.Body.Bytes(), &d)
+	if d.AgentBuild != 5 {
+		t.Fatalf("agent_build = %d, want 5", d.AgentBuild)
+	}
+
+	// The devices list exposes the latest release, so the client can compare.
+	rec = doJSON(t, h, http.MethodGet, "/api/devices", "", nil)
+	var list struct {
+		Devices []shared.DeviceStatus `json:"devices"`
+		Latest  *shared.LatestAgent   `json:"latest"`
+	}
+	mustJSON(t, rec.Body.Bytes(), &list)
+	if list.Latest == nil || list.Latest.Build != 7 {
+		t.Fatalf("latest = %+v, want build 7", list.Latest)
+	}
+	if len(list.Devices) != 1 || list.Devices[0].AgentBuild >= list.Latest.Build {
+		t.Fatalf("device should be behind latest: dev=%+v latest=%+v", list.Devices, list.Latest)
 	}
 }
 
