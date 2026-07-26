@@ -100,7 +100,7 @@ export function Overview() {
             <Skeleton className="h-24 w-full" />
           </div>
         ) : !devices.data?.devices.length ? (
-          <Muted>No devices yet. Click “Add device” to enroll one.</Muted>
+          <Muted>No devices yet. Click “Add device” to set one up.</Muted>
         ) : (
           <DeviceTable
             devices={devices.data.devices.map((d) => ({ status: d, metric: metricByUuid.get(d.device_uuid) }))}
