@@ -121,7 +121,7 @@ export function AddDeviceDialog({ open, onClose }: { open: boolean; onClose: () 
                     • If the browser or Windows warns about the file, choose <strong>Keep</strong> /{" "}
                     <strong>Run anyway</strong> — it's your own server.
                   </li>
-                  <li>• Installs silently (no window or tray), starts at logon, and self-updates.</li>
+                  <li>• Installs quietly in the background, starts when you log in, and keeps itself up to date.</li>
                   <li>• Run it within ~15 minutes; the one-time key expires.</li>
                 </ul>
               </Step>

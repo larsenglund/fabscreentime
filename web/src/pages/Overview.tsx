@@ -37,7 +37,8 @@ export function Overview() {
   const metricByUuid = new Map(devs.map((d) => [d.device_uuid, d]));
 
   function revoke(uuid: string) {
-    if (!confirm("Revoke this device? Its agent can no longer upload until re-enrolled.")) return;
+    if (!confirm("Revoke this device? It will stop sending in activity until you set it up again."))
+      return;
     patch.mutate({ uuid, revoked: true });
   }
 
@@ -45,8 +46,8 @@ export function Overview() {
     if (
       !confirm(
         `Delete “${label}” and all of its recorded data? This can't be undone.\n\n` +
-          "If it's a real machine that still has the agent installed, uninstall it there too, " +
-          "or it will keep trying to report.",
+          "If this is a real computer that still has FabScreenTime installed, uninstall it there " +
+          "too, or it will keep trying to report.",
       )
     )
       return;
@@ -64,15 +65,15 @@ export function Overview() {
         <Kpi
           label={`Screentime · ${range === "24h" ? "today" : `last ${days}d`}`}
           value={summary.isLoading ? <Skeleton className="h-7 w-20" /> : fmtMinutes(totalMonitor)}
-          sub="monitor-on, all devices"
+          sub="screen on, all devices"
         />
         <Kpi
           label="Daily average"
           value={summary.isLoading ? <Skeleton className="h-7 w-20" /> : fmtMinutes(totalMonitor / days)}
           sub="per day in range"
         />
-        <Kpi label="Devices reporting" value={reporting} sub={`of ${devs.length} enrolled`} />
-        <Kpi label="Online now" value={onlineNow} sub="reported < 3 min ago" />
+        <Kpi label="Devices reporting" value={reporting} sub={`of ${devs.length} set up`} />
+        <Kpi label="Online now" value={onlineNow} sub="reported under 3 min ago" />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-5">
@@ -137,13 +138,13 @@ function DeviceTable({
             </Link>
             <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
               <span className="truncate">
-                {status.agent_version ? `agent ${status.agent_version} · ` : ""}
+                {status.agent_version ? `app v${status.agent_version} · ` : ""}
                 {ago(status.last_seen)}
               </span>
               {latestBuild > 0 && status.agent_build > 0 && status.agent_build < latestBuild && (
                 <span
                   className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
-                  title={`This agent (build ${status.agent_build}) is behind the latest release (build ${latestBuild}). It should self-update within a few minutes.`}
+                  title="The FabScreenTime app on this computer is behind the latest version. It should update itself within a few minutes."
                 >
                   update pending
                 </span>
@@ -151,7 +152,7 @@ function DeviceTable({
               {status.clock_skew_known && Math.abs(status.clock_skew) >= CLOCK_SKEW_FLAG_SECONDS && (
                 <span
                   className="shrink-0 rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-medium text-rose-600 dark:text-rose-400"
-                  title={`This device's clock is ${fmtClockSkew(status.clock_skew)} relative to the server. Large skew distorts when its activity is recorded; check the machine's time sync.`}
+                  title={`This computer's clock is ${fmtClockSkew(status.clock_skew)} compared with the server. When a clock is off by that much, its activity gets logged at the wrong times — check the computer's time settings.`}
                 >
                   clock {fmtClockSkew(status.clock_skew)}
                 </span>

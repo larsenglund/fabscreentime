@@ -49,7 +49,7 @@ export function TrendArea({ points }: { points: TrendPoint[] }) {
   const H = 140;
   const pad = 8;
   const n = points.length;
-  if (!n) return <Muted>No daily rollups yet.</Muted>;
+  if (!n) return <Muted>No daily totals yet.</Muted>;
   const max = Math.max(1, ...points.map((p) => p.monitor_minutes));
   const x = (i: number) => (n <= 1 ? W / 2 : pad + (i / (n - 1)) * (W - 2 * pad));
   const y = (v: number) => H - pad - (v / max) * (H - 2 * pad);
@@ -83,7 +83,7 @@ export function HourStrip({ hours }: { hours: HourBucket[] }) {
           <div
             key={h.hour}
             className="relative h-full flex-1"
-            title={`${String(h.hour).padStart(2, "0")}:00 — ${h.monitor_minutes}m on, ${h.active_minutes}m active`}
+            title={`${String(h.hour).padStart(2, "0")}:00 — screen on ${h.monitor_minutes}m, in use ${h.active_minutes}m`}
           >
             <div
               className="absolute inset-x-0 bottom-0 rounded-sm bg-monitor"
@@ -133,8 +133,8 @@ export function TopApps({ apps }: { apps: AppStat[] }) {
 export function SignalLegend() {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-      <LegendItem className="bg-monitor" label="Monitor-on" />
-      <LegendItem className="bg-active" label="Input-active" />
+      <LegendItem className="bg-monitor" label="Screen on" />
+      <LegendItem className="bg-active" label="In use" />
     </div>
   );
 }
@@ -171,7 +171,7 @@ export function Heatmap({ days }: { days: HeatDay[] }) {
               <div
                 key={h}
                 className="aspect-square flex-1 rounded-[2px]"
-                title={`${d.day} ${String(h).padStart(2, "0")}:00 — ${v}m on`}
+                title={`${d.day} ${String(h).padStart(2, "0")}:00 — screen on ${v}m`}
                 style={{
                   backgroundColor: v
                     ? `rgb(var(--monitor) / ${(0.15 + 0.85 * Math.min(1, v / max)).toFixed(3)})`
@@ -186,11 +186,12 @@ export function Heatmap({ days }: { days: HeatDay[] }) {
   );
 }
 
-/** SignalComparison shows monitor-on / input-active / macro per day. macro
- *  (input while the monitor is off) is the §0.1 autoclicker fingerprint and is
- *  flagged in red whenever it is nonzero. */
+/** SignalComparison shows, per day, screen-on vs. in-use minutes plus a third
+ *  "active while the screen was off" bar — input recorded with the monitor
+ *  physically off, the unattended/automation signal (PLAN.md §0.1) — flagged in
+ *  red whenever it is nonzero. */
 export function SignalComparison({ days }: { days: SignalDay[] }) {
-  if (!days.some((d) => d.session_minutes > 0)) return <Muted>No samples in this range yet.</Muted>;
+  if (!days.some((d) => d.session_minutes > 0)) return <Muted>No activity recorded in this range yet.</Muted>;
   const max = Math.max(1, ...days.map((d) => Math.max(d.monitor_minutes, d.active_minutes, d.macro_minutes)));
   const anyMacro = days.some((d) => d.macro_minutes > 0);
   return (
@@ -208,14 +209,15 @@ export function SignalComparison({ days }: { days: SignalDay[] }) {
         ))}
       </div>
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-        <LegendItem className="bg-monitor" label="Monitor-on" />
-        <LegendItem className="bg-active" label="Input-active" />
-        <LegendItem className="bg-danger" label="Macro (input, screen off)" />
+        <LegendItem className="bg-monitor" label="Screen on" />
+        <LegendItem className="bg-active" label="In use" />
+        <LegendItem className="bg-danger" label="Active while screen off" />
       </div>
       {anyMacro && (
         <p className="mt-2 text-xs text-danger">
-          Input was recorded while the monitor was off — the unattended/autoclicker fingerprint
-          (§0.1). This time is excluded from screentime.
+          The mouse or keyboard was active while the screen was switched off — usually a sign the
+          computer was left running on its own, or driven by an automated script. This time doesn't
+          count as screentime.
         </p>
       )}
     </div>

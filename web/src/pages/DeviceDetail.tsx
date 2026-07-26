@@ -62,14 +62,14 @@ export function DeviceDetail() {
           <div className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-1 text-sm text-muted-foreground">
             <span>
               {d.hostname && <>{d.hostname} · </>}
-              {d.agent_version && <>agent {d.agent_version} · </>}
-              {d.enrolled_at > 0 && <>enrolled {fmtDate(d.enrolled_at)} · </>}
+              {d.agent_version && <>app v{d.agent_version} · </>}
+              {d.enrolled_at > 0 && <>added {fmtDate(d.enrolled_at)} · </>}
               {ago(d.last_seen)}
             </span>
             {d.clock_skew_known && Math.abs(d.clock_skew) >= CLOCK_SKEW_FLAG_SECONDS && (
               <span
                 className="rounded bg-rose-500/15 px-1.5 py-0.5 text-xs font-medium text-rose-600 dark:text-rose-400"
-                title="Large clock skew distorts when this device's activity is recorded. Check its time sync (e.g. Windows Internet Time)."
+                title="This computer's clock is off by too much, so its activity gets logged at the wrong times. Check its time settings (in Windows, turn on Set time automatically / Internet Time)."
               >
                 clock {fmtClockSkew(d.clock_skew)}
               </span>
@@ -79,8 +79,8 @@ export function DeviceDetail() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Kpi label="Monitor-on · day" value={fmtMinutes(dayMonitor)} />
-        <Kpi label="Input-active · day" value={fmtMinutes(dayActive)} />
+        <Kpi label="Screen on · day" value={fmtMinutes(dayMonitor)} />
+        <Kpi label="In use · day" value={fmtMinutes(dayActive)} />
         <Kpi
           label="Idle while on"
           value={fmtMinutes(Math.max(0, dayMonitor - dayActive))}
@@ -114,8 +114,9 @@ export function DeviceDetail() {
         </div>
         {timeline.isLoading ? <Skeleton className="h-28 w-full" /> : <HourStrip hours={hours} />}
         <p className="mt-4 text-xs text-muted-foreground">
-          The solid bars are monitor-on minutes — the primary “screentime” signal. The lighter
-          overlay is input-active minutes; the gap between them is time the screen was on but idle.
+          The solid bars show when the screen was switched on — that's the time we count as
+          screentime. The lighter overlay shows when someone was actually using the computer; the gap
+          between them is time the screen was on but sitting idle.
         </p>
       </CardSection>
 
@@ -131,7 +132,7 @@ export function DeviceDetail() {
       </CardSection>
 
       <CardSection
-        title="Signal comparison"
+        title="Screen on vs. in use"
         action={<span className="text-xs text-muted-foreground">last 7 days</span>}
       >
         {signals.isLoading ? (
@@ -143,7 +144,7 @@ export function DeviceDetail() {
 
       <CardSection
         title="Activity heatmap"
-        action={<span className="text-xs text-muted-foreground">monitor-on · last 14 days</span>}
+        action={<span className="text-xs text-muted-foreground">screen on · last 14 days</span>}
       >
         {heatmap.isLoading ? (
           <Skeleton className="h-48 w-full" />
@@ -154,14 +155,15 @@ export function DeviceDetail() {
 
       <CardSection
         title="Update history"
-        action={<span className="text-xs text-muted-foreground">agent self-updates</span>}
+        action={<span className="text-xs text-muted-foreground">the app updates itself</span>}
       >
         {eventsQ.isLoading ? (
           <Skeleton className="h-16 w-full" />
         ) : !eventsQ.data?.events.length ? (
           <p className="text-sm text-muted-foreground">
-            No agent updates recorded yet. Entries appear here whenever this device's agent build
-            changes — a build moving <em>backwards</em> is flagged as a downgrade.
+            No updates yet. Each time the FabScreenTime app on this computer updates itself, it'll
+            show up here — and we'll flag it if it ever goes back to an <em>older</em> version
+            instead of a newer one.
           </p>
         ) : (
           <ol className="space-y-2">
@@ -190,8 +192,9 @@ export function DeviceDetail() {
           <div>
             <div className="text-sm font-medium">Log window titles</div>
             <div className="mt-0.5 max-w-md text-xs text-muted-foreground">
-              When off, only the app (.exe) and activity are recorded — window titles (which can
-              reveal URLs, documents, and contacts) are dropped server-side before storage.
+              When this is off, we only keep which app was open and when — not the window titles.
+              Titles can reveal web addresses, document names, and contacts, so they're removed
+              before anything is saved.
             </div>
           </div>
           <Switch

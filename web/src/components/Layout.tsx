@@ -29,8 +29,9 @@ export function Layout() {
       </main>
 
       <footer className="mx-auto max-w-5xl px-4 pb-10 pt-2 text-xs text-muted-foreground sm:px-6">
-        “Screentime” = time a monitor is physically on — the best available presence proxy, not a
-        tamper-proof measure. Input-active is shown as a lighter secondary layer.
+        “Screentime” means the time a screen is physically switched on. It's the best measure we
+        have of when a device is really being used, though it isn't foolproof — a screen can be left
+        on. The lighter shade shows when someone was actually at the keyboard or mouse.
       </footer>
 
       <AddDeviceDialog open={addOpen} onClose={() => setAddOpen(false)} />
