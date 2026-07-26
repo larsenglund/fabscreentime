@@ -47,6 +47,14 @@ export function DeviceDetail() {
   const d = device.data;
   const isToday = day === todayUTC();
 
+  // Average screen-on time per day over the last week. The signals series is
+  // zero-filled server-side (one row per calendar day), so dividing the total by
+  // its length gives a true per-day average that counts idle days too.
+  const weekSignals = signals.data?.signals ?? [];
+  const avgDailyMonitor = weekSignals.length
+    ? weekSignals.reduce((sum, s) => sum + s.monitor_minutes, 0) / weekSignals.length
+    : 0;
+
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState("");
   const pencilRef = useRef<HTMLButtonElement>(null);
@@ -161,7 +169,11 @@ export function DeviceDetail() {
           value={fmtMinutes(Math.max(0, dayMonitor - dayActive))}
           sub="on, no input"
         />
-        <Kpi label="Status" value={d ? d.status : "—"} />
+        <Kpi
+          label="Avg screen on / day"
+          value={signals.isLoading ? <Skeleton className="h-7 w-16" /> : fmtMinutes(avgDailyMonitor)}
+          sub="last 7 days"
+        />
       </div>
 
       <CardSection
