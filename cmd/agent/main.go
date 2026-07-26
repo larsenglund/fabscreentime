@@ -148,8 +148,8 @@ func main() {
 		OnFirstCheckIn: func() { agent.MarkCheckedIn(*dataDir, build) },
 	}, agent.NewSampler(), queue, agent.NewHTTPUploader(serverURL, creds.APIToken), updater)
 
-	log.Printf("agent %s (build %d) starting: device=%s host=%s server=%s interval=%s",
-		Version, build, creds.DeviceUUID, hostname, serverURL, *interval)
+	log.Printf("agent %s (build %d) starting: device=%s host=%s server=%s interval=%s datadir=%s",
+		Version, build, creds.DeviceUUID, hostname, serverURL, *interval, *dataDir)
 	a.Run(ctx)
 
 	// Run only returns on graceful shutdown (ctx cancelled). Record it so this
