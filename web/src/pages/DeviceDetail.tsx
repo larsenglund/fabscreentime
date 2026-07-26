@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Loader2, Pencil } from "lucide-react";
 import {
   useDevice,
   useDeviceEvents,
@@ -39,12 +39,42 @@ export function DeviceDetail() {
   const heatmap = useHeatmap(uuid, 14);
   const eventsQ = useDeviceEvents(uuid);
   const patch = usePatchDevice();
+  const rename = usePatchDevice();
 
   const hours = timeline.data?.hours ?? [];
   const dayMonitor = hours.reduce((s, h) => s + h.monitor_minutes, 0);
   const dayActive = hours.reduce((s, h) => s + h.active_minutes, 0);
   const d = device.data;
   const isToday = day === todayUTC();
+
+  const [editingName, setEditingName] = useState(false);
+  const [draftName, setDraftName] = useState("");
+  const pencilRef = useRef<HTMLButtonElement>(null);
+  const wasEditing = useRef(false);
+
+  // Return focus to the rename (pencil) trigger when the editor closes, so a
+  // keyboard/screen-reader user doesn't get dropped to <body>. Guarded so it
+  // doesn't steal focus on first mount.
+  useEffect(() => {
+    if (wasEditing.current && !editingName) pencilRef.current?.focus();
+    wasEditing.current = editingName;
+  }, [editingName]);
+
+  function startRename() {
+    setDraftName(d?.name ?? "");
+    rename.reset();
+    setEditingName(true);
+  }
+  function submitRename() {
+    if (rename.isPending) return; // ignore a second Enter while a save is in flight
+    const name = draftName.trim();
+    if (!name) return; // a computer must keep a name; empty falls back to hostname anyway
+    if (name === (d?.name ?? "")) {
+      setEditingName(false);
+      return;
+    }
+    rename.mutate({ uuid, name }, { onSuccess: () => setEditingName(false) });
+  }
 
   return (
     <div className="space-y-6">
@@ -53,11 +83,56 @@ export function DeviceDetail() {
           <ChevronLeft className="size-4" /> Overview
         </Link>
         <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-xl font-semibold tracking-tight">
-            {d ? d.name || d.hostname || uuid.slice(0, 8) : <Skeleton className="h-6 w-40" />}
-          </h1>
-          {d && <StatusBadge device={d} />}
+          {d && editingName ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                autoFocus
+                value={draftName}
+                onChange={(e) => setDraftName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submitRename();
+                  if (e.key === "Escape") setEditingName(false);
+                }}
+                onFocus={(e) => e.target.select()}
+                maxLength={64}
+                aria-label="Computer name"
+                aria-invalid={rename.isError}
+                aria-describedby={rename.isError ? "rename-error" : undefined}
+                className="h-9 w-56 max-w-full rounded-lg border bg-background px-3 text-xl font-semibold tracking-tight outline-none focus-visible:border-primary"
+              />
+              <Button size="sm" onClick={submitRename} disabled={rename.isPending || !draftName.trim()}>
+                {rename.isPending ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
+                Save
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setEditingName(false)} disabled={rename.isPending}>
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <>
+              <h1 className="text-xl font-semibold tracking-tight">
+                {d ? d.name || d.hostname || uuid.slice(0, 8) : <Skeleton className="h-6 w-40" />}
+              </h1>
+              {d && (
+                <button
+                  ref={pencilRef}
+                  onClick={startRename}
+                  aria-label="Rename this computer"
+                  title="Rename this computer"
+                  className="-m-1 rounded p-1 text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <Pencil className="size-4" />
+                </button>
+              )}
+              {d && <StatusBadge device={d} />}
+            </>
+          )}
         </div>
+        {editingName && rename.isError && (
+          <p id="rename-error" role="alert" className="mt-1.5 text-xs text-danger">
+            Couldn't rename. Try again.
+          </p>
+        )}
         {d && (
           <div className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-1 text-sm text-muted-foreground">
             <span>

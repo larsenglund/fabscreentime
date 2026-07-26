@@ -180,7 +180,11 @@ export function usePatchDevice() {
         revoked: v.revoked,
         log_titles: v.log_titles,
       }),
-    onSuccess: (_data, v) => {
+    onSuccess: (data, v) => {
+      // Seed the single-device cache with the fresh status the PATCH returned, so
+      // the UI reflects the change immediately instead of briefly showing the old
+      // value until the background refetch lands.
+      qc.setQueryData(["device", v.uuid], data);
       qc.invalidateQueries({ queryKey: ["devices"] });
       qc.invalidateQueries({ queryKey: ["summary"] });
       qc.invalidateQueries({ queryKey: ["device", v.uuid] });

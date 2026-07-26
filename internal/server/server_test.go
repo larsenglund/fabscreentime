@@ -430,6 +430,37 @@ func TestSelfUpdateAuditLog(t *testing.T) {
 	}
 }
 
+// TestRenameDevice covers the dashboard rename path (PATCH name): the new name is
+// persisted, trimmed, and returned; an unknown device is 404.
+func TestRenameDevice(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	srv, _ := newTestServer(t, now)
+	h := srv.Handler()
+	uuid, _ := enrollDevice(t, h, "Old Name")
+
+	name := "  Living Room PC  "
+	rec := doJSON(t, h, http.MethodPatch, "/api/devices/"+uuid, "", shared.PatchDeviceRequest{Name: &name})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch name = %d, want 200", rec.Code)
+	}
+	var d shared.DeviceStatus
+	mustJSON(t, rec.Body.Bytes(), &d)
+	if d.Name != "Living Room PC" {
+		t.Fatalf("name = %q, want trimmed %q", d.Name, "Living Room PC")
+	}
+
+	// Persisted for the next read.
+	mustJSON(t, doJSON(t, h, http.MethodGet, "/api/devices/"+uuid, "", nil).Body.Bytes(), &d)
+	if d.Name != "Living Room PC" {
+		t.Fatalf("persisted name = %q, want %q", d.Name, "Living Room PC")
+	}
+
+	// Unknown device → 404.
+	if r := doJSON(t, h, http.MethodPatch, "/api/devices/nope", "", shared.PatchDeviceRequest{Name: &name}); r.Code != http.StatusNotFound {
+		t.Fatalf("rename unknown = %d, want 404", r.Code)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	srv, _ := newTestServer(t, time.Now())
 	rec := httptest.NewRecorder()
