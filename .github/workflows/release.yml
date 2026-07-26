@@ -28,9 +28,14 @@ jobs:
         working-directory: web
         run: npm ci && npm run build
 
+      # Build and scan the release with the latest patched Go, NOT the go.mod
+      # language floor (go 1.25.0). govulncheck reports every stdlib CVE fixed in
+      # a later patch, so pinning the initial 1.25.0 makes the release job go red
+      # over time for vulnerabilities we don't ship. A release should be built on a
+      # current toolchain anyway; go.mod stays the compatibility floor.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "stable"
           cache: true
 
       - name: Vet & test
