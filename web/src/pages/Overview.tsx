@@ -85,7 +85,11 @@ export function Overview() {
           {summary.isLoading ? <Skeleton className="h-40 w-full" /> : <DeviceBars devices={devs} />}
         </CardSection>
 
-        <CardSection title="Daily trend" className="lg:col-span-2">
+        <CardSection
+          title="Daily trend"
+          action={<span className="text-xs text-muted-foreground">shaded = weekend</span>}
+          className="lg:col-span-2"
+        >
           {trend.isLoading ? (
             <Skeleton className="h-32 w-full" />
           ) : (

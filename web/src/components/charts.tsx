@@ -1,7 +1,13 @@
 import { Link } from "react-router-dom";
 import type { AppStat, DeviceSummary, HeatDay, HourBucket, SignalDay, TrendPoint } from "../lib/api";
-import { fmtMinutes, fmtDayShort } from "../lib/format";
+import { fmtMinutes, fmtDayShort, isWeekend } from "../lib/format";
+import { cn } from "../lib/cn";
 import { Muted } from "./ui/skeleton";
+
+/** weekendLabel emphasises Saturday/Sunday day labels so weekends stand out in
+ *  the day-based views; weekdays stay muted. */
+const weekendLabel = (day: string) =>
+  isWeekend(day) ? "font-semibold text-foreground" : "text-muted-foreground";
 
 const barTrack = "h-2.5 overflow-hidden rounded-full bg-muted";
 
@@ -56,8 +62,27 @@ export function TrendArea({ points }: { points: TrendPoint[] }) {
   const path = (key: "monitor_minutes" | "active_minutes") =>
     points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`).join(" ");
   const area = `${path("monitor_minutes")} L${x(n - 1).toFixed(1)},${H - pad} L${x(0).toFixed(1)},${H - pad} Z`;
+  // Weekend shading: each band reaches halfway to its neighbours so consecutive
+  // weekend days tile into one block, with the outer edges flush to the chart.
+  const weekendBands = points.map((p, i) => {
+    if (!isWeekend(p.day)) return null;
+    const left = i === 0 ? 0 : (x(i - 1) + x(i)) / 2;
+    const right = i === n - 1 ? W : (x(i) + x(i + 1)) / 2;
+    return (
+      <rect
+        key={p.day}
+        x={left}
+        y={0}
+        width={Math.max(0, right - left)}
+        height={H}
+        className="fill-muted-foreground"
+        opacity={0.14}
+      />
+    );
+  });
   return (
     <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="h-32 w-full">
+      {weekendBands}
       <path d={area} className="fill-monitor" opacity={0.14} />
       <path d={path("monitor_minutes")} className="stroke-monitor" fill="none" strokeWidth={2} vectorEffect="non-scaling-stroke" />
       <path
@@ -166,7 +191,7 @@ export function Heatmap({ days }: { days: HeatDay[] }) {
         </div>
         {days.map((d) => (
           <div key={d.day} className="mb-[2px] flex items-center gap-[2px]">
-            <div className="w-16 shrink-0 pr-1 text-right text-[10px] text-muted-foreground">
+            <div className={cn("w-16 shrink-0 pr-1 text-right text-[10px]", weekendLabel(d.day))}>
               {fmtDayShort(d.day)}
             </div>
             {d.hours.map((v, h) => (
@@ -198,10 +223,22 @@ export function SignalComparison({ days }: { days: SignalDay[] }) {
   const anyMacro = days.some((d) => d.macro_minutes > 0);
   return (
     <div>
-      <div className="space-y-2">
+      {/* Rows carry their own vertical padding (for the weekend band), so the
+          list gap is trimmed to keep the original rhythm. */}
+      <div className="space-y-1">
         {days.map((d) => (
-          <div key={d.day} className="flex items-center gap-3">
-            <div className="w-20 shrink-0 text-[11px] text-muted-foreground">{fmtDayShort(d.day)}</div>
+          // The negative margin lets the weekend band bleed past the bars without
+          // shifting the row, so weekday and weekend rows stay aligned.
+          <div
+            key={d.day}
+            className={cn(
+              "-mx-2 flex items-center gap-3 rounded-md px-2 py-1",
+              isWeekend(d.day) && "bg-muted/70",
+            )}
+          >
+            <div className={cn("w-20 shrink-0 text-[11px]", weekendLabel(d.day))}>
+              {fmtDayShort(d.day)}
+            </div>
             <div className="flex-1 space-y-[3px]">
               <CmpBar value={d.monitor_minutes} max={max} className="bg-monitor" />
               <CmpBar value={d.active_minutes} max={max} className="bg-active" />

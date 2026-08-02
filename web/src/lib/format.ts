@@ -57,6 +57,16 @@ export function fmtDayShort(day: string): string {
   return `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
 }
 
+/** isWeekend reports whether a "YYYY-MM-DD" day is a Saturday or Sunday, so the
+ *  day-based views can shade weekends. UTC, matching the backend's day
+ *  boundaries and fmtDayShort above. */
+export function isWeekend(day: string): boolean {
+  const d = new Date(day + "T00:00:00Z");
+  if (Number.isNaN(d.getTime())) return false;
+  const wd = d.getUTCDay();
+  return wd === 0 || wd === 6;
+}
+
 /** fmtDate renders a unix-seconds timestamp as a short absolute date
  *  ("20 Jul 2026"), for enrollment/registry context. */
 export function fmtDate(ts: number): string {
