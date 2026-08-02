@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import type { AppStat, DeviceSummary, HeatDay, HourBucket, SignalDay, TrendPoint } from "../lib/api";
-import { fmtMinutes } from "../lib/format";
+import { fmtMinutes, fmtDayShort } from "../lib/format";
 import { Muted } from "./ui/skeleton";
 
 const barTrack = "h-2.5 overflow-hidden rounded-full bg-muted";
@@ -154,8 +154,10 @@ export function Heatmap({ days }: { days: HeatDay[] }) {
   if (!days.length) return <Muted>No data in this range yet.</Muted>;
   return (
     <div className="overflow-x-auto">
-      <div className="min-w-[520px]">
-        <div className="mb-1 flex gap-[2px] pl-12 text-[10px] text-muted-foreground">
+      <div className="min-w-[540px]">
+        {/* pl matches the row label column (w-16) + the 2px flex gap, so the hour
+            headings stay aligned with the cells below. */}
+        <div className="mb-1 flex gap-[2px] pl-[66px] text-[10px] text-muted-foreground">
           {Array.from({ length: 24 }).map((_, h) => (
             <div key={h} className="flex-1 text-center">
               {h % 6 === 0 ? h : ""}
@@ -164,14 +166,14 @@ export function Heatmap({ days }: { days: HeatDay[] }) {
         </div>
         {days.map((d) => (
           <div key={d.day} className="mb-[2px] flex items-center gap-[2px]">
-            <div className="w-11 shrink-0 pr-1 text-right text-[10px] text-muted-foreground">
-              {d.day.slice(5)}
+            <div className="w-16 shrink-0 pr-1 text-right text-[10px] text-muted-foreground">
+              {fmtDayShort(d.day)}
             </div>
             {d.hours.map((v, h) => (
               <div
                 key={h}
                 className="aspect-square flex-1 rounded-[2px]"
-                title={`${d.day} ${String(h).padStart(2, "0")}:00 — screen on ${v}m`}
+                title={`${fmtDayShort(d.day)} ${String(h).padStart(2, "0")}:00 — screen on ${v}m`}
                 style={{
                   backgroundColor: v
                     ? `rgb(var(--monitor) / ${(0.15 + 0.85 * Math.min(1, v / max)).toFixed(3)})`
@@ -199,7 +201,7 @@ export function SignalComparison({ days }: { days: SignalDay[] }) {
       <div className="space-y-2">
         {days.map((d) => (
           <div key={d.day} className="flex items-center gap-3">
-            <div className="w-14 shrink-0 text-[11px] text-muted-foreground">{d.day.slice(5)}</div>
+            <div className="w-20 shrink-0 text-[11px] text-muted-foreground">{fmtDayShort(d.day)}</div>
             <div className="flex-1 space-y-[3px]">
               <CmpBar value={d.monitor_minutes} max={max} className="bg-monitor" />
               <CmpBar value={d.active_minutes} max={max} className="bg-active" />

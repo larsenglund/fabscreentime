@@ -46,6 +46,17 @@ export function todayUTC(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** fmtDayShort renders a "YYYY-MM-DD" day as "Sun 26/7" — the weekday plus
+ *  day/month reads far faster than a bare "07-26" on a chart axis. Parsed as UTC
+ *  because the backend's day boundaries are UTC. */
+export function fmtDayShort(day: string): string {
+  const d = new Date(day + "T00:00:00Z");
+  if (Number.isNaN(d.getTime())) return day;
+  return `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
+}
+
 /** fmtDate renders a unix-seconds timestamp as a short absolute date
  *  ("20 Jul 2026"), for enrollment/registry context. */
 export function fmtDate(ts: number): string {

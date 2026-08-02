@@ -17,6 +17,7 @@ import {
   shiftDay,
   fmtClockSkew,
   fmtDate,
+  fmtDayShort,
   CLOCK_SKEW_FLAG_SECONDS,
 } from "../lib/format";
 import { Kpi } from "../components/Kpi";
@@ -191,7 +192,7 @@ export function DeviceDetail() {
             <Button variant="ghost" size="icon" onClick={() => setDay(shiftDay(day, -1))} aria-label="Previous day">
               <ChevronLeft className="size-4" />
             </Button>
-            <span className="tnum w-24 text-center text-sm">{day}</span>
+            <span className="tnum w-24 text-center text-sm">{fmtDayShort(day)}</span>
             <Button
               variant="ghost"
               size="icon"
