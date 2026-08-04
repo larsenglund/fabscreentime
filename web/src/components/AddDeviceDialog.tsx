@@ -121,6 +121,10 @@ export function AddDeviceDialog({ open, onClose }: { open: boolean; onClose: () 
                     • If the browser or Windows warns about the file, choose <strong>Keep</strong> /{" "}
                     <strong>Run anyway</strong> — it's your own server.
                   </li>
+                  <li>
+                    • It asks for <strong>administrator access</strong> once (to let the agent past
+                    Windows Defender) — click <strong>Yes</strong>.
+                  </li>
                   <li>• Installs quietly in the background, starts when you log in, and keeps itself up to date.</li>
                   <li>• Run it within ~15 minutes; the one-time key expires.</li>
                 </ul>

@@ -227,10 +227,13 @@ export async function manifestSHA256(): Promise<string> {
  *  double-clicks it. curl-downloaded files carry no Mark-of-the-Web, so the
  *  agent itself runs without a SmartScreen prompt; only the .bat does.
  *
- *  After installing it waits ~15s and checks the agent is still running: a
- *  behavioral antivirus block (the documented failure mode, §9) deletes the exe
- *  and kills the process seconds after start, so without this the installer would
- *  falsely report success. On failure it prints the antivirus-exclusion fix. */
+ *  Right before the agent first runs it adds a Defender folder-exclusion so a
+ *  behavioral antivirus block (the documented failure mode, §9) can't quarantine
+ *  it seconds after start. Only that one step elevates (a one-shot RunAs
+ *  PowerShell) — the download and install stay unelevated so the agent's task and
+ *  DPAPI token bind to the logged-in user, not whoever approved the prompt. It
+ *  then waits ~15s and confirms the agent is still running, printing the
+ *  third-party-AV fix if something else blocked it. */
 export function buildBatInstaller(server: string, secret: string, sha: string): string {
   const lines = [
     "@echo off",
@@ -273,6 +276,21 @@ export function buildBatInstaller(server: string, secret: string, sha: string): 
     ":enroll",
     "echo   - enrolling this device",
     '> "%DIR%\\enroll.json" echo {"server":"%SERVER%","enroll_secret":"%SECRET%"}',
+    "",
+    "rem Everything above ran as the normal user. Now — and only now, right before",
+    "rem the agent first runs — ask Windows Defender to allow the agent's folder, so",
+    "rem a behavioral block can't quarantine it seconds after it starts (the common",
+    "rem failure on a new PC). This is the ONLY step that needs admin: elevate just a",
+    "rem one-shot PowerShell for it and leave the install itself unelevated, so the",
+    "rem agent's task and DPAPI token stay bound to THIS user, not whoever approved",
+    "rem the prompt. It must come BEFORE -install (which launches the agent), not",
+    "rem after — the block is faster than anyone can click a UAC prompt. Best-effort:",
+    "rem if admin is declined or a third-party AV is used, we carry on and the",
+    "rem liveness check below explains what to do.",
+    "echo   - allowing the agent in Windows Defender (asks for admin once)",
+    `> "%DIR%\\allow.ps1" echo try { Add-MpPreference -ExclusionPath '%DIR%' -ErrorAction Stop } catch { }`,
+    `powershell -NoProfile -Command "try { Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','%DIR%\\allow.ps1' } catch { }"`,
+    'del "%DIR%\\allow.ps1" >nul 2>&1',
     "echo   - installing background agent",
     '"%DIR%\\agent.exe" -install -server "%SERVER%"',
     "if errorlevel 1 goto :fail_install",
@@ -292,24 +310,18 @@ export function buildBatInstaller(server: string, secret: string, sha: string): 
     "",
     ":blocked",
     "echo(",
-    "echo   Almost there - but the agent is NOT running.",
+    "echo   Almost there - but the agent is NOT running. An antivirus most likely",
+    "echo   removed it:",
     "echo(",
-    "echo   Your antivirus (usually Windows Defender) most likely removed it. This",
-    "echo   tool installs a hidden background app that quietly reports in, which can",
-    "echo   resemble spyware to antivirus heuristics - so a brand-new unsigned copy",
-    "echo   is sometimes quarantined even though it is safe and the very same file",
-    "echo   runs fine on other PCs.",
+    "echo    - Windows Defender: we tried to allow it automatically. If you clicked",
+    "echo      No on the administrator prompt, just run this installer again and",
+    "echo      click Yes.",
+    "echo    - A different antivirus (Norton, Avast, McAfee, ...): open it, allow",
+    "echo      this folder, then run this installer again:",
+    "echo         %DIR%",
     "echo(",
-    "echo   To fix it, open PowerShell as ADMINISTRATOR on this PC and run:",
-    "echo(",
-    'echo        Add-MpPreference -ExclusionPath "%DIR%"',
-    'echo        curl.exe -fsS -o "%DIR%\\agent.exe" "%SERVER%/agent/download"',
-    'echo        "%DIR%\\agent.exe" -install -server "%SERVER%"',
-    "echo(",
-    "echo   Add the exclusion FIRST, or the fresh copy is removed again. This PC is",
-    "echo   already enrolled, so it just reconnects - no need to add it again.",
-    "echo(",
-    "echo   No antivirus alert? Then open %DIR%\\agent.log to see a different error.",
+    "echo   This PC is already enrolled, so it just reconnects - no need to re-add",
+    "echo   it. No antivirus involved? Open %DIR%\\agent.log for a different error.",
     "pause",
     "exit /b 1",
     "",
