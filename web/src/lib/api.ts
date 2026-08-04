@@ -225,7 +225,12 @@ export async function manifestSHA256(): Promise<string> {
  *  lives in the file BODY, never a URL (PLAN.md §7.3). It uses only tools built
  *  into Windows 10+ (curl, certutil) — no PowerShell, no terminal: the user
  *  double-clicks it. curl-downloaded files carry no Mark-of-the-Web, so the
- *  agent itself runs without a SmartScreen prompt; only the .bat does. */
+ *  agent itself runs without a SmartScreen prompt; only the .bat does.
+ *
+ *  After installing it waits ~15s and checks the agent is still running: a
+ *  behavioral antivirus block (the documented failure mode, §9) deletes the exe
+ *  and kills the process seconds after start, so without this the installer would
+ *  falsely report success. On failure it prints the antivirus-exclusion fix. */
 export function buildBatInstaller(server: string, secret: string, sha: string): string {
   const lines = [
     "@echo off",
@@ -271,11 +276,42 @@ export function buildBatInstaller(server: string, secret: string, sha: string): 
     "echo   - installing background agent",
     '"%DIR%\\agent.exe" -install -server "%SERVER%"',
     "if errorlevel 1 goto :fail_install",
+    "",
+    "rem A behavioral antivirus block (Defender's most common reaction to a new,",
+    "rem unsigned, self-hiding agent) deletes agent.exe and kills the process a few",
+    "rem seconds after it starts. Wait, then confirm it is actually still running so",
+    "rem we don't claim success for an agent that was silently removed.",
+    "echo   - checking it stays running (antivirus can quarantine new background apps)",
+    "timeout /t 15 /nobreak >nul",
+    'tasklist /FI "IMAGENAME eq agent.exe" /NH 2>nul | find /I "agent.exe" >nul || goto :blocked',
     "echo(",
     "echo   All set. This PC will appear on the dashboard within a minute.",
     "echo   You can close this window.",
     "timeout /t 8 >nul",
     "exit /b 0",
+    "",
+    ":blocked",
+    "echo(",
+    "echo   Almost there - but the agent is NOT running.",
+    "echo(",
+    "echo   Your antivirus (usually Windows Defender) most likely removed it. This",
+    "echo   tool installs a hidden background app that quietly reports in, which can",
+    "echo   resemble spyware to antivirus heuristics - so a brand-new unsigned copy",
+    "echo   is sometimes quarantined even though it is safe and the very same file",
+    "echo   runs fine on other PCs.",
+    "echo(",
+    "echo   To fix it, open PowerShell as ADMINISTRATOR on this PC and run:",
+    "echo(",
+    'echo        Add-MpPreference -ExclusionPath "%DIR%"',
+    'echo        curl.exe -fsS -o "%DIR%\\agent.exe" "%SERVER%/agent/download"',
+    'echo        "%DIR%\\agent.exe" -install -server "%SERVER%"',
+    "echo(",
+    "echo   Add the exclusion FIRST, or the fresh copy is removed again. This PC is",
+    "echo   already enrolled, so it just reconnects - no need to add it again.",
+    "echo(",
+    "echo   No antivirus alert? Then open %DIR%\\agent.log to see a different error.",
+    "pause",
+    "exit /b 1",
     "",
     ":fail_dl",
     "echo(",
