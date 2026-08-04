@@ -6,7 +6,8 @@
 
 /* Semantic palette as raw RGB channels, swapped for light/dark. "Trimmed modern":
    a neutral zinc base, indigo primary, emerald for the load-bearing monitor-on
-   series, a fainter sky for the secondary input-active layer. */
+   series, and a deep true-blue for the input-active layer — kept clearly apart in
+   hue and lightness from the emerald so the two never blend where they overlap. */
 :root {
   --background: 250 250 251;
   --foreground: 24 24 27;
@@ -17,7 +18,7 @@
   --primary: 79 70 229;
   --primary-foreground: 255 255 255;
   --monitor: 16 185 129;
-  --active: 14 165 233;
+  --active: 37 99 235;
   --warn: 217 119 6;
   --danger: 220 38 38;
 }
@@ -32,7 +33,7 @@
   --primary: 129 140 248;
   --primary-foreground: 9 9 11;
   --monitor: 52 211 153;
-  --active: 56 189 248;
+  --active: 96 165 250;
   --warn: 251 191 36;
   --danger: 248 113 113;
 }
