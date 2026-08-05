@@ -12,7 +12,8 @@ const weekendLabel = (day: string) =>
 const barTrack = "h-2.5 overflow-hidden rounded-full bg-muted";
 
 /** DeviceBars ranks devices by monitor-on minutes. Each bar shows monitor-on
- *  (solid) with input-active drawn over it, so the idle gap is visible. */
+ *  (solid) with input-active drawn over it, so the idle gap is visible; the label
+ *  reads in-use / screen-on / total (session) minutes. */
 export function DeviceBars({ devices }: { devices: DeviceSummary[] }) {
   const rows = [...devices]
     .filter((d) => d.sample_count > 0 || d.monitor_minutes > 0)
@@ -30,7 +31,16 @@ export function DeviceBars({ devices }: { devices: DeviceSummary[] }) {
             >
               {d.name || d.hostname || d.device_uuid.slice(0, 8)}
             </Link>
-            <span className="tnum shrink-0 text-muted-foreground">{fmtMinutes(d.monitor_minutes)}</span>
+            <span
+              className="tnum shrink-0 text-muted-foreground"
+              title="in use / screen on / total (device on)"
+            >
+              {fmtMinutes(d.active_minutes)}
+              <span className="mx-1 opacity-40">/</span>
+              {fmtMinutes(d.monitor_minutes)}
+              <span className="mx-1 opacity-40">/</span>
+              {fmtMinutes(d.session_minutes)}
+            </span>
           </div>
           <div className={`relative ${barTrack}`}>
             <div
