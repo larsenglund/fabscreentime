@@ -13,7 +13,7 @@ const barTrack = "h-2.5 overflow-hidden rounded-full bg-muted";
 
 /** DeviceBars ranks devices by monitor-on minutes. Each bar shows monitor-on
  *  (solid) with input-active drawn over it, so the idle gap is visible; the label
- *  reads in-use / screen-on / total (session) minutes. */
+ *  reads in-use / screen-on minutes. */
 export function DeviceBars({ devices }: { devices: DeviceSummary[] }) {
   const rows = [...devices]
     .filter((d) => d.sample_count > 0 || d.monitor_minutes > 0)
@@ -31,15 +31,10 @@ export function DeviceBars({ devices }: { devices: DeviceSummary[] }) {
             >
               {d.name || d.hostname || d.device_uuid.slice(0, 8)}
             </Link>
-            <span
-              className="tnum shrink-0 text-muted-foreground"
-              title="in use / screen on / total (device on)"
-            >
+            <span className="tnum shrink-0 text-muted-foreground" title="in use / screen on">
               {fmtMinutes(d.active_minutes)}
               <span className="mx-1 opacity-40">/</span>
               {fmtMinutes(d.monitor_minutes)}
-              <span className="mx-1 opacity-40">/</span>
-              {fmtMinutes(d.session_minutes)}
             </span>
           </div>
           <div className={`relative ${barTrack}`}>
@@ -164,12 +159,14 @@ export function TopApps({ apps }: { apps: AppStat[] }) {
   );
 }
 
-/** SignalLegend explains the two series wherever they appear together. */
+/** SignalLegend explains the two series wherever they appear together. Order
+ *  matches the bar left-to-right: input-active sits at the left, monitor-on
+ *  extends past it. */
 export function SignalLegend() {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-      <LegendItem className="bg-monitor" label="Screen on" />
       <LegendItem className="bg-active" label="In use" />
+      <LegendItem className="bg-monitor" label="Screen on" />
     </div>
   );
 }
