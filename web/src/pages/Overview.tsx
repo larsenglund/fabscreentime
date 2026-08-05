@@ -1,20 +1,12 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronRight, Trash2 } from "lucide-react";
-import {
-  useDeleteDevice,
-  useDevices,
-  usePatchDevice,
-  useSummary,
-  useTrend,
-  type DeviceSummary,
-} from "../lib/api";
+import { ChevronRight } from "lucide-react";
+import { useDevices, useSummary, useTrend, type DeviceSummary } from "../lib/api";
 import { fmtMinutes, ago, online, fmtClockSkew, CLOCK_SKEW_FLAG_SECONDS } from "../lib/format";
 import { RangeSwitcher, type RangeKey } from "../components/RangeSwitcher";
 import { Kpi } from "../components/Kpi";
 import { CardSection } from "../components/ui/card";
 import { StatusBadge } from "../components/ui/badge";
-import { Button } from "../components/ui/button";
 import { Skeleton, Muted } from "../components/ui/skeleton";
 import { DeviceBars, TrendArea, SignalLegend } from "../components/charts";
 
@@ -25,8 +17,6 @@ export function Overview() {
   const summary = useSummary(range);
   const trend = useTrend(range);
   const devices = useDevices();
-  const patch = usePatchDevice();
-  const remove = useDeleteDevice();
 
   const devs = summary.data?.devices ?? [];
   const totalMonitor = devs.reduce((s, d) => s + d.monitor_minutes, 0);
@@ -35,24 +25,6 @@ export function Overview() {
   const days = rangeDays[range] ?? 7;
 
   const metricByUuid = new Map(devs.map((d) => [d.device_uuid, d]));
-
-  function revoke(uuid: string) {
-    if (!confirm("Revoke this device? It will stop sending in activity until you set it up again."))
-      return;
-    patch.mutate({ uuid, revoked: true });
-  }
-
-  function remove_(uuid: string, label: string) {
-    if (
-      !confirm(
-        `Delete “${label}” and all of its recorded data? This can't be undone.\n\n` +
-          "If this is a real computer that still has FabScreenTime installed, uninstall it there " +
-          "too, or it will keep trying to report.",
-      )
-    )
-      return;
-    remove.mutate(uuid);
-  }
 
   return (
     <div className="space-y-6">
@@ -109,8 +81,6 @@ export function Overview() {
           <DeviceTable
             devices={devices.data.devices.map((d) => ({ status: d, metric: metricByUuid.get(d.device_uuid) }))}
             latestBuild={devices.data.latest?.build ?? 0}
-            onRevoke={revoke}
-            onDelete={remove_}
           />
         )}
       </CardSection>
@@ -121,13 +91,9 @@ export function Overview() {
 function DeviceTable({
   devices,
   latestBuild,
-  onRevoke,
-  onDelete,
 }: {
   devices: { status: import("../lib/api").DeviceStatus; metric?: DeviceSummary }[];
   latestBuild: number;
-  onRevoke: (uuid: string) => void;
-  onDelete: (uuid: string, label: string) => void;
 }) {
   return (
     <div className="divide-y">
@@ -166,28 +132,8 @@ function DeviceTable({
           <div className="tnum hidden text-right text-sm sm:block">
             {fmtMinutes(metric?.monitor_minutes ?? 0)}
           </div>
-          {status.status === "revoked" ? (
-            <span className="text-xs text-muted-foreground">revoked</span>
-          ) : (
-            <Button variant="danger" size="sm" onClick={() => onRevoke(status.device_uuid)}>
-              Revoke
-            </Button>
-          )}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="text-muted-foreground hover:text-danger"
-            aria-label="Delete device"
-            title="Delete device and its data"
-            onClick={() =>
-              onDelete(
-                status.device_uuid,
-                status.name || status.hostname || status.device_uuid.slice(0, 8),
-              )
-            }
-          >
-            <Trash2 className="size-4" />
-          </Button>
+          {/* Revoke/Delete deliberately live on the device page, not here: they are
+              rare, destructive, and shouldn't sit in a list scanned every day. */}
           <Link to={`/devices/${status.device_uuid}`} className="text-muted-foreground hover:text-foreground">
             <ChevronRight className="size-4" />
           </Link>

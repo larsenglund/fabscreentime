@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { Check, ChevronLeft, ChevronRight, Loader2, Pencil } from "lucide-react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { Check, ChevronLeft, ChevronRight, Loader2, Pencil, Trash2 } from "lucide-react";
 import {
+  useDeleteDevice,
   useDevice,
   useDeviceEvents,
   useHeatmap,
@@ -41,6 +42,9 @@ export function DeviceDetail() {
   const eventsQ = useDeviceEvents(uuid);
   const patch = usePatchDevice();
   const rename = usePatchDevice();
+  const access = usePatchDevice(); // revoke/restore, kept separate so it doesn't disable the others
+  const remove = useDeleteDevice();
+  const navigate = useNavigate();
 
   const hours = timeline.data?.hours ?? [];
   const dayMonitor = hours.reduce((s, h) => s + h.monitor_minutes, 0);
@@ -86,6 +90,29 @@ export function DeviceDetail() {
       return;
     }
     rename.mutate({ uuid, name }, { onSuccess: () => setEditingName(false) });
+  }
+
+  const label = d?.name || d?.hostname || uuid.slice(0, 8);
+
+  function revoke() {
+    if (!confirm("Revoke this device? It will stop sending in activity until you set it up again."))
+      return;
+    access.mutate({ uuid, revoked: true });
+  }
+  function restore() {
+    access.mutate({ uuid, revoked: false });
+  }
+  function remove_() {
+    if (
+      !confirm(
+        `Delete “${label}” and all of its recorded data? This can't be undone.\n\n` +
+          "If this is a real computer that still has FabScreenTime installed, uninstall it there " +
+          "too, or it will keep trying to report.",
+      )
+    )
+      return;
+    // The device is gone once this succeeds, so leave its (now dead) page.
+    remove.mutate(uuid, { onSuccess: () => navigate("/") });
   }
 
   return (
@@ -298,6 +325,48 @@ export function DeviceDetail() {
             disabled={!d || patch.isPending}
             onChange={(v) => patch.mutate({ uuid, log_titles: v })}
           />
+        </div>
+      </CardSection>
+
+      {/* Rare, destructive actions live here at the bottom rather than in the
+          overview list, which is scanned every day. */}
+      <CardSection title="Manage this computer">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium">
+              {d?.status === "revoked" ? "Restore access" : "Revoke access"}
+            </div>
+            <div className="mt-0.5 max-w-md text-xs text-muted-foreground">
+              {d?.status === "revoked"
+                ? "This computer is blocked from sending in new activity. Everything already recorded is still here."
+                : "Stops this computer sending in new activity. Everything already recorded is kept, and you can undo this here."}
+            </div>
+          </div>
+          {d?.status === "revoked" ? (
+            <Button variant="outline" size="sm" onClick={restore} disabled={access.isPending}>
+              {access.isPending && <Loader2 className="size-4 animate-spin" />}
+              Restore
+            </Button>
+          ) : (
+            <Button variant="danger" size="sm" onClick={revoke} disabled={!d || access.isPending}>
+              {access.isPending && <Loader2 className="size-4 animate-spin" />}
+              Revoke
+            </Button>
+          )}
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4">
+          <div>
+            <div className="text-sm font-medium">Delete this computer</div>
+            <div className="mt-0.5 max-w-md text-xs text-muted-foreground">
+              Removes it from the dashboard along with every minute of activity recorded for it.
+              This can't be undone.
+            </div>
+          </div>
+          <Button variant="danger" size="sm" onClick={remove_} disabled={!d || remove.isPending}>
+            {remove.isPending ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+            Delete
+          </Button>
         </div>
       </CardSection>
     </div>
