@@ -334,6 +334,66 @@ func TestTopAppsWithoutRollup(t *testing.T) {
 	}
 }
 
+func TestDeviceTitles(t *testing.T) {
+	st := openTestStore(t)
+	id, err := st.UpsertDevice("dev-titles", "host", "1.0", dayBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.InsertSamples(id, []shared.Sample{
+		{ClientTS: dayBase + 60, MonitorOn: 1, Exe: "chrome.exe", Title: "GitHub - the repo"},
+		{ClientTS: dayBase + 120, MonitorOn: 1, Exe: "chrome.exe", Title: "GitHub - the repo"},
+		{ClientTS: dayBase + 180, MonitorOn: 1, Exe: "chrome.exe", Title: "News site"},
+		{ClientTS: dayBase + 240, MonitorOn: 1, Exe: "code.exe", Title: "main.go - project"},
+		{ClientTS: dayBase + 300, MonitorOn: 0, Exe: "chrome.exe", Title: "Screen was off"}, // excluded (monitor off)
+		{ClientTS: dayBase + 360, MonitorOn: 1, Exe: "chrome.exe", Title: ""},               // excluded (opted-out/empty)
+	}, dayBase+400); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unfiltered: three distinct on-screen titles, GitHub first (2 min).
+	titles, err := st.DeviceTitles("dev-titles", dayBase, dayBase+86400, "", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(titles) != 3 {
+		t.Fatalf("titles = %+v, want 3 (monitor-off and empty excluded)", titles)
+	}
+	if titles[0].Title != "GitHub - the repo" || titles[0].Minutes != 2 || titles[0].Exe != "chrome.exe" {
+		t.Fatalf("titles[0] = %+v, want GitHub/2/chrome", titles[0])
+	}
+	if titles[0].LastSeen != dayBase+120 {
+		t.Fatalf("GitHub last_seen = %d, want %d", titles[0].LastSeen, dayBase+120)
+	}
+
+	// exe filter.
+	only, err := st.DeviceTitles("dev-titles", dayBase, dayBase+86400, "code.exe", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(only) != 1 || only[0].Exe != "code.exe" {
+		t.Fatalf("exe-filtered = %+v, want only code.exe", only)
+	}
+
+	// case-insensitive substring search.
+	found, err := st.DeviceTitles("dev-titles", dayBase, dayBase+86400, "", "github", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 1 || found[0].Title != "GitHub - the repo" {
+		t.Fatalf("search 'github' = %+v, want the GitHub title", found)
+	}
+
+	// App list for the filter (distinct apps with any title), sorted.
+	apps, err := st.DeviceTitleApps("dev-titles", dayBase, dayBase+86400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 2 || apps[0] != "chrome.exe" || apps[1] != "code.exe" {
+		t.Fatalf("title apps = %v, want [chrome.exe code.exe]", apps)
+	}
+}
+
 // A restart loses the in-memory dirty set; the startup sweep must rebuild it so
 // those days still land in daily_stats.
 func TestCatchUpRollupsAfterRestart(t *testing.T) {

@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 // Types mirror the Go JSON contract (internal/server, internal/shared).
 export interface DeviceSummary {
@@ -53,6 +53,13 @@ export interface HourBucket {
 export interface AppStat {
   exe: string;
   monitor_minutes: number;
+}
+
+export interface TitleStat {
+  title: string;
+  exe: string;
+  minutes: number;
+  last_seen: number;
 }
 
 export interface SignalDay {
@@ -137,6 +144,19 @@ export function useTopApps(uuid: string, range: string) {
     queryKey: ["top-apps", uuid, range],
     queryFn: () => getJSON<{ apps: AppStat[] }>(`/api/devices/${uuid}/top-apps?range=${range}&limit=10`),
     refetchInterval: LIVE,
+  });
+}
+
+/** useTitles powers the per-device window-titles explorer. Not on the live poll —
+ *  it's an on-demand exploration view keyed on its filters. */
+export function useTitles(uuid: string, range: string, exe: string, q: string) {
+  return useQuery({
+    queryKey: ["titles", uuid, range, exe, q],
+    queryFn: () =>
+      getJSON<{ titles: TitleStat[]; apps: string[] }>(
+        `/api/devices/${uuid}/titles?range=${range}&exe=${encodeURIComponent(exe)}&q=${encodeURIComponent(q)}`,
+      ),
+    placeholderData: keepPreviousData, // keep results visible while filters change
   });
 }
 

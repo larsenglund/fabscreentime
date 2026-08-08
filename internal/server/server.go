@@ -137,6 +137,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/devices/{uuid}", s.handleDeleteDevice)
 	mux.HandleFunc("GET /api/devices/{uuid}/timeline", s.handleTimeline)
 	mux.HandleFunc("GET /api/devices/{uuid}/top-apps", s.handleTopApps)
+	mux.HandleFunc("GET /api/devices/{uuid}/titles", s.handleTitles)
 	mux.HandleFunc("GET /api/devices/{uuid}/signals", s.handleSignals)
 	mux.HandleFunc("GET /api/devices/{uuid}/heatmap", s.handleHeatmap)
 	mux.HandleFunc("GET /api/devices/{uuid}/events", s.handleDeviceEvents)
@@ -599,6 +600,48 @@ func (s *Server) handleTopApps(w http.ResponseWriter, r *http.Request) {
 		apps = []AppStat{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"apps": apps})
+}
+
+// handleTitles powers the per-device window-titles explorer: distinct foreground
+// titles over a range with the minutes each was in front, filterable by app and a
+// text search, plus the list of apps for the filter. Titles are only ever emitted
+// as JSON strings (React renders them as text), so a hostile title can't inject.
+func (s *Server) handleTitles(w http.ResponseWriter, r *http.Request) {
+	uuid := r.PathValue("uuid")
+	until := s.now()
+	since := until.Add(-parseRange(r.URL.Query().Get("range")))
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	exe := strings.TrimSpace(r.URL.Query().Get("exe"))
+	limit := 200
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		if n > 500 {
+			n = 500
+		}
+		limit = n
+	}
+	titles, err := s.store.DeviceTitles(uuid, since.Unix(), until.Unix(), exe, q, limit)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("titles: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	apps, err := s.store.DeviceTitleApps(uuid, since.Unix(), until.Unix())
+	if err != nil {
+		log.Printf("title apps: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if titles == nil {
+		titles = []TitleStat{}
+	}
+	if apps == nil {
+		apps = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"titles": titles, "apps": apps})
 }
 
 // handleSignals returns the per-day monitor-on / input-active / macro breakdown

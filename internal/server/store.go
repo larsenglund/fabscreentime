@@ -879,6 +879,85 @@ func (s *Store) DeviceTopApps(uuid string, fromUnix, toUnix int64, limit int) ([
 	return out, rows.Err()
 }
 
+// TitleStat is one distinct foreground window title with the screen-on minutes it
+// was in front and when it was last seen.
+type TitleStat struct {
+	Title    string `json:"title"`
+	Exe      string `json:"exe"`
+	Minutes  int    `json:"minutes"`
+	LastSeen int64  `json:"last_seen"`
+}
+
+// DeviceTitles returns distinct foreground window titles for a device over
+// [fromUnix,toUnix), each with the number of screen-on minutes it was in front and
+// when it was last seen, most time first. Only screen-on samples count (matching
+// the "screentime" framing). Optional exe and case-insensitive substring filters
+// narrow the result. Empty titles — never captured, or dropped by the per-device
+// title opt-out (§9) — are excluded, so an opted-out device simply yields nothing.
+func (s *Store) DeviceTitles(uuid string, fromUnix, toUnix int64, exe, q string, limit int) ([]TitleStat, error) {
+	id, err := s.deviceIDByUUID(uuid)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := s.db.Query(`
+		SELECT window_title,
+		       COALESCE(NULLIF(exe_name,''),'(unknown)') AS exe,
+		       COUNT(*) AS mins, MAX(ts) AS last
+		FROM samples
+		WHERE device_id = ? AND monitor_on = 1 AND ts >= ? AND ts < ?
+		  AND window_title IS NOT NULL AND window_title <> ''
+		  AND (? = '' OR COALESCE(NULLIF(exe_name,''),'(unknown)') = ?)
+		  AND (? = '' OR window_title LIKE '%' || ? || '%')
+		GROUP BY window_title, exe
+		ORDER BY mins DESC, last DESC
+		LIMIT ?`, id, fromUnix, toUnix, exe, exe, q, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TitleStat
+	for rows.Next() {
+		var t TitleStat
+		if err := rows.Scan(&t.Title, &t.Exe, &t.Minutes, &t.LastSeen); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// DeviceTitleApps lists the distinct apps (exe) that have any logged window title
+// in the range, for the titles page's app filter. Range-scoped but not narrowed by
+// the exe/search filters, so the dropdown always offers every app.
+func (s *Store) DeviceTitleApps(uuid string, fromUnix, toUnix int64) ([]string, error) {
+	id, err := s.deviceIDByUUID(uuid)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+		SELECT DISTINCT COALESCE(NULLIF(exe_name,''),'(unknown)') AS exe
+		FROM samples
+		WHERE device_id = ? AND monitor_on = 1 AND ts >= ? AND ts < ?
+		  AND window_title IS NOT NULL AND window_title <> ''
+		ORDER BY exe`, id, fromUnix, toUnix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // DeviceDay identifies one device's UTC day, the unit the rollup works on.
 type DeviceDay struct {
 	DeviceID int64

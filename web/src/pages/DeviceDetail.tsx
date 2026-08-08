@@ -252,6 +252,11 @@ export function DeviceDetail() {
         ) : (
           <TopApps apps={topApps.data?.apps ?? []} />
         )}
+        <div className="mt-4 border-t pt-3 text-right">
+          <Link to="titles" className="text-sm font-medium text-primary hover:underline">
+            Explore window titles →
+          </Link>
+        </div>
       </CardSection>
 
       <CardSection
