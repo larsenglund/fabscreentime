@@ -13,7 +13,7 @@ import { DeviceBars, TrendArea, SignalLegend } from "../components/charts";
 const rangeDays: Record<string, number> = { "24h": 1, "7d": 7, "30d": 30 };
 
 export function Overview() {
-  const [range, setRange] = useState<RangeKey>("7d");
+  const [range, setRange] = useState<RangeKey>("24h");
   const summary = useSummary(range);
   const trend = useTrend(range);
   const devices = useDevices();
