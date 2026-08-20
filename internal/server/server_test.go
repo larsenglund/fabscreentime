@@ -461,6 +461,51 @@ func TestRenameDevice(t *testing.T) {
 	}
 }
 
+// TestSummaryTodayIsCalendarDay covers the fix for the overview/device mismatch:
+// range=24h ("Today") must be the local calendar day, not a rolling 24 hours, and
+// must agree with the device timeline for the same day.
+func TestSummaryTodayIsCalendarDay(t *testing.T) {
+	loc := time.Local
+	now := time.Date(2026, 2, 15, 10, 0, 0, 0, loc) // 10:00 local
+	srv, _ := newTestServer(t, now)
+	h := srv.Handler()
+	_, token := enrollDevice(t, h, "PC")
+
+	midnight := time.Date(2026, 2, 15, 0, 0, 0, 0, loc)
+	doIngest(t, h, token, shared.IngestRequest{
+		Samples: []shared.Sample{
+			{ClientTS: now.Add(-time.Hour).Unix(), MonitorOn: 1, Exe: "a.exe"},      // today 09:00
+			{ClientTS: midnight.Add(-time.Hour).Unix(), MonitorOn: 1, Exe: "b.exe"}, // yesterday 23:00 (in a rolling 24h, but not today)
+		},
+	})
+
+	var sum struct {
+		Devices []DeviceSummary `json:"devices"`
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/dashboard/summary?range=24h", nil))
+	mustJSON(t, rec.Body.Bytes(), &sum)
+	if len(sum.Devices) != 1 || sum.Devices[0].MonitorMinutes != 1 {
+		t.Fatalf("today summary monitor = %+v, want exactly the one of-today sample (calendar day, not rolling 24h)", sum.Devices)
+	}
+
+	// The device timeline for the same local day must report the same number.
+	var tl struct {
+		Hours []HourBucket `json:"hours"`
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+		"/api/devices/"+sum.Devices[0].DeviceUUID+"/timeline?day="+now.Format("2006-01-02"), nil))
+	mustJSON(t, rec.Body.Bytes(), &tl)
+	total := 0
+	for _, hb := range tl.Hours {
+		total += hb.MonitorMinutes
+	}
+	if total != 1 {
+		t.Fatalf("timeline-today monitor = %d, want 1 (must match the overview)", total)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	srv, _ := newTestServer(t, time.Now())
 	rec := httptest.NewRecorder()

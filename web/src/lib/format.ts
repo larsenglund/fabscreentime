@@ -40,10 +40,13 @@ export function fmtClockSkew(sec: number): string {
   return `${mag} ${sec >= 0 ? "fast" : "slow"}`;
 }
 
-/** todayUTC returns today's date as YYYY-MM-DD in UTC (matches the backend's
- *  day boundaries). */
-export function todayUTC(): string {
-  return new Date().toISOString().slice(0, 10);
+/** today returns the current LOCAL calendar date as YYYY-MM-DD. The backend
+ *  parses day strings in its own local zone (the household timezone), so as long
+ *  as the browser shares that zone, "today" means the same real day on both. */
+export function today(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];

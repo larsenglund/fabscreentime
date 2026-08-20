@@ -504,7 +504,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	until := s.now()
-	since := until.Add(-parseRange(r.URL.Query().Get("range")))
+	since := rangeStart(until, r.URL.Query().Get("range"))
 	rows, err := s.store.Summary(since.Unix(), until.Unix())
 	if err != nil {
 		log.Printf("summary: %v", err)
@@ -556,14 +556,17 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	day := strings.TrimSpace(r.URL.Query().Get("day"))
 	if day == "" {
-		day = DayUTC(s.now().Unix())
+		day = s.now().Format("2006-01-02") // local calendar day
 	}
-	t, err := time.Parse("2006-01-02", day)
+	// Parse the day in the server's local zone so "2026-08-20" spans local
+	// midnight→midnight; DeviceTimeline buckets hours relative to this start, so
+	// the hour axis is local too.
+	t, err := time.ParseInLocation("2006-01-02", day, s.now().Location())
 	if err != nil {
 		http.Error(w, "bad day (want YYYY-MM-DD)", http.StatusBadRequest)
 		return
 	}
-	hours, err := s.store.DeviceTimeline(r.PathValue("uuid"), t.UTC().Unix())
+	hours, err := s.store.DeviceTimeline(r.PathValue("uuid"), t.Unix())
 	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -578,7 +581,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTopApps(w http.ResponseWriter, r *http.Request) {
 	until := s.now()
-	since := until.Add(-parseRange(r.URL.Query().Get("range")))
+	since := rangeStart(until, r.URL.Query().Get("range"))
 	limit := 10
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
 		if n > 50 {
@@ -609,7 +612,7 @@ func (s *Server) handleTopApps(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTitles(w http.ResponseWriter, r *http.Request) {
 	uuid := r.PathValue("uuid")
 	until := s.now()
-	since := until.Add(-parseRange(r.URL.Query().Get("range")))
+	since := rangeStart(until, r.URL.Query().Get("range"))
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	exe := strings.TrimSpace(r.URL.Query().Get("exe"))
 	limit := 200
@@ -738,7 +741,27 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 	s.spa.ServeHTTP(w, r)
 }
 
-// parseRange turns "7d"/"24h"/"30d" into a duration, defaulting to 7 days.
+// rangeStart returns the inclusive start of a dashboard window ("24h" | "7d" |
+// "30d") as a calendar-day boundary in now's timezone (the server's local zone in
+// production, from the mounted /etc/localtime). Crucially "24h" means the local
+// calendar day so far — "today" — NOT a rolling 24 hours: that's what the per-day
+// device views show, so the same day reads identically on the overview and the
+// device page. "7d"/"30d" are the last N calendar days, today included.
+func rangeStart(now time.Time, r string) time.Time {
+	days := 7
+	switch strings.TrimSpace(r) {
+	case "24h":
+		days = 1
+	case "30d":
+		days = 30
+	}
+	y, m, d := now.Date()
+	midnight := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
+	return midnight.AddDate(0, 0, -(days - 1))
+}
+
+// parseRange turns "7d"/"24h"/"30d" into a duration, defaulting to 7 days. Used by
+// the multi-day charts (trend/signals/heatmap), which still bucket by UTC day.
 func parseRange(s string) time.Duration {
 	s = strings.TrimSpace(s)
 	if s == "" {

@@ -805,8 +805,10 @@ type HourBucket struct {
 	ActiveMinutes  int `json:"active_minutes"`
 }
 
-// DeviceTimeline returns 24 zero-filled hourly buckets for the UTC day starting
-// at dayStart, computed from raw samples (works without a rollup having run).
+// DeviceTimeline returns 24 zero-filled hourly buckets for the day starting at
+// dayStart (an epoch — the caller chooses the zone; the handler passes local
+// midnight), computed from raw samples (works without a rollup having run). Hours
+// are relative to dayStart, so a local midnight yields local hour buckets.
 func (s *Store) DeviceTimeline(uuid string, dayStart int64) ([]HourBucket, error) {
 	buckets := make([]HourBucket, 24)
 	for h := range buckets {

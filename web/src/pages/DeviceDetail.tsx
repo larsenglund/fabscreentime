@@ -14,7 +14,7 @@ import {
 import {
   fmtMinutes,
   ago,
-  todayUTC,
+  today,
   shiftDay,
   fmtClockSkew,
   fmtDate,
@@ -32,7 +32,7 @@ import { RangeSwitcher, type RangeKey } from "../components/RangeSwitcher";
 
 export function DeviceDetail() {
   const { uuid = "" } = useParams();
-  const [day, setDay] = useState(todayUTC());
+  const [day, setDay] = useState(today());
   const [range, setRange] = useState<RangeKey>("30d");
   const device = useDevice(uuid);
   const timeline = useTimeline(uuid, day);
@@ -50,7 +50,7 @@ export function DeviceDetail() {
   const dayMonitor = hours.reduce((s, h) => s + h.monitor_minutes, 0);
   const dayActive = hours.reduce((s, h) => s + h.active_minutes, 0);
   const d = device.data;
-  const isToday = day === todayUTC();
+  const isToday = day === today();
 
   // Average screen-on / in-use time per day over the last week. The signals series
   // is zero-filled server-side (one row per calendar day), so dividing the total
