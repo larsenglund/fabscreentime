@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"sync"
 
@@ -31,18 +32,28 @@ func NewQueue(path string, max int) (*Queue, error) {
 	return q, nil
 }
 
+// load reads the persisted queue. It NEVER fails the agent's startup: the queue
+// is only a buffer of not-yet-uploaded samples, so a missing, unreadable, or
+// corrupt file (e.g. NUL bytes left by an unclean shutdown) is recovered by
+// starting empty rather than crashing. Bricking the whole agent over an
+// unreadable buffer — losing all future logging — is far worse than dropping a
+// few unsent samples.
 func (q *Queue) load() error {
 	data, err := os.ReadFile(q.path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+		if !os.IsNotExist(err) {
+			log.Printf("queue: cannot read %s (%v); starting with an empty queue", q.path, err)
 		}
-		return err
+		return nil
 	}
 	if len(data) == 0 {
 		return nil
 	}
-	return json.Unmarshal(data, &q.buf)
+	if err := json.Unmarshal(data, &q.buf); err != nil {
+		log.Printf("queue: %s is corrupt (%v); discarding it and starting with an empty queue", q.path, err)
+		q.buf = nil
+	}
+	return nil
 }
 
 func (q *Queue) persist() error {
@@ -51,7 +62,23 @@ func (q *Queue) persist() error {
 		return err
 	}
 	tmp := q.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	// Flush the bytes to disk BEFORE the rename. Without this, a crash/power-loss
+	// just after the rename can leave the file allocated but unwritten — i.e. NUL
+	// bytes — which is exactly the corruption that bricked agents on unclean
+	// shutdown. fsync-then-rename makes the swap durable.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, q.path)
