@@ -960,6 +960,23 @@ func (s *Store) DeviceTitleApps(uuid string, fromUnix, toUnix int64) ([]string, 
 	return out, rows.Err()
 }
 
+// ClearDeviceTitles blanks every stored window title for a device (sets them
+// NULL), leaving the samples, apps, and every screentime metric untouched — only
+// the titles are erased. Returns the number of samples cleared. Backs the "wipe
+// logged titles" action on the titles explorer. Unknown UUID → sql.ErrNoRows.
+func (s *Store) ClearDeviceTitles(uuid string) (int64, error) {
+	id, err := s.deviceIDByUUID(uuid)
+	if err != nil {
+		return 0, err
+	}
+	res, err := s.db.Exec(
+		`UPDATE samples SET window_title = NULL WHERE device_id = ? AND window_title IS NOT NULL`, id)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // DeviceDay identifies one device's UTC day, the unit the rollup works on.
 type DeviceDay struct {
 	DeviceID int64

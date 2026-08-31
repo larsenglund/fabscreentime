@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -138,6 +139,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/devices/{uuid}/timeline", s.handleTimeline)
 	mux.HandleFunc("GET /api/devices/{uuid}/top-apps", s.handleTopApps)
 	mux.HandleFunc("GET /api/devices/{uuid}/titles", s.handleTitles)
+	mux.HandleFunc("POST /api/devices/{uuid}/clear-titles", s.handleClearTitles)
 	mux.HandleFunc("GET /api/devices/{uuid}/signals", s.handleSignals)
 	mux.HandleFunc("GET /api/devices/{uuid}/heatmap", s.handleHeatmap)
 	mux.HandleFunc("GET /api/devices/{uuid}/events", s.handleDeviceEvents)
@@ -645,6 +647,41 @@ func (s *Server) handleTitles(w http.ResponseWriter, r *http.Request) {
 		apps = []string{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"titles": titles, "apps": apps})
+}
+
+// clearTitlesPassword gates the destructive "wipe logged titles" button. This is a
+// deliberately light speed-bump for a household tool, NOT real access control: the
+// dashboard plane has no auth of its own (it is meant to sit behind Cloudflare
+// Access), and on the LAN the password crosses the wire in cleartext. It only
+// guards against a casual or accidental wipe.
+const clearTitlesPassword = "r0xx4r"
+
+func (s *Server) handleClearTitles(w http.ResponseWriter, r *http.Request) {
+	uuid := r.PathValue("uuid")
+	r.Body = http.MaxBytesReader(w, r.Body, maxEnrollBytes)
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(req.Password), []byte(clearTitlesPassword)) != 1 {
+		http.Error(w, "wrong password", http.StatusForbidden)
+		return
+	}
+	n, err := s.store.ClearDeviceTitles(uuid)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("clear titles: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("cleared %d window titles for device %s", n, uuid)
+	writeJSON(w, http.StatusOK, map[string]any{"cleared": n})
 }
 
 // handleSignals returns the per-day monitor-on / input-active / macro breakdown

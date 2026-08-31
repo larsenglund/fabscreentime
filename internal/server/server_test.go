@@ -506,6 +506,56 @@ func TestSummaryTodayIsCalendarDay(t *testing.T) {
 	}
 }
 
+// TestClearTitles covers the password-gated title wipe: a wrong password is
+// refused and changes nothing; the right one blanks the titles while the sample
+// (and thus screentime) survives.
+func TestClearTitles(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	srv, _ := newTestServer(t, now)
+	h := srv.Handler()
+	uuid, token := enrollDevice(t, h, "PC")
+	doIngest(t, h, token, shared.IngestRequest{
+		Samples: []shared.Sample{{ClientTS: now.Add(-time.Minute).Unix(), MonitorOn: 1, Exe: "chrome.exe", Title: "Secret Page"}},
+	})
+
+	titleCount := func() int {
+		var out struct {
+			Titles []TitleStat `json:"titles"`
+		}
+		mustJSON(t, doJSON(t, h, http.MethodGet, "/api/devices/"+uuid+"/titles?range=7d", "", nil).Body.Bytes(), &out)
+		return len(out.Titles)
+	}
+	if titleCount() != 1 {
+		t.Fatalf("precondition: want 1 title, got %d", titleCount())
+	}
+
+	// Wrong password → 403, nothing cleared.
+	if rec := doJSON(t, h, http.MethodPost, "/api/devices/"+uuid+"/clear-titles", "",
+		map[string]string{"password": "nope"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("wrong password = %d, want 403", rec.Code)
+	}
+	if titleCount() != 1 {
+		t.Fatal("wrong password must not clear anything")
+	}
+
+	// Right password → cleared, but the sample (screentime) is still there.
+	rec := doJSON(t, h, http.MethodPost, "/api/devices/"+uuid+"/clear-titles", "",
+		map[string]string{"password": "r0xx4r"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear = %d, want 200", rec.Code)
+	}
+	if titleCount() != 0 {
+		t.Fatalf("after clear want 0 titles, got %d", titleCount())
+	}
+	var summary struct {
+		Devices []DeviceSummary `json:"devices"`
+	}
+	mustJSON(t, doJSON(t, h, http.MethodGet, "/api/dashboard/summary?range=7d", "", nil).Body.Bytes(), &summary)
+	if len(summary.Devices) != 1 || summary.Devices[0].MonitorMinutes != 1 {
+		t.Fatalf("screentime should survive a title wipe, got %+v", summary.Devices)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	srv, _ := newTestServer(t, time.Now())
 	rec := httptest.NewRecorder()

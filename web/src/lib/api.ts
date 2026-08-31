@@ -160,6 +160,26 @@ export function useTitles(uuid: string, range: string, exe: string, q: string) {
   });
 }
 
+/** useClearTitles wipes all stored window titles for a device, gated by a password
+ *  checked server-side. Throws Error("wrong-password") on a 403 so the UI can tell
+ *  a bad password apart from a real failure. */
+export function useClearTitles(uuid: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (password: string) => {
+      const r = await fetch(`/api/devices/${uuid}/clear-titles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (r.status === 403) throw new Error("wrong-password");
+      if (!r.ok) throw new Error(`clear-titles → ${r.status}`);
+      return (await r.json()) as { cleared: number };
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["titles", uuid] }),
+  });
+}
+
 export function useSignals(uuid: string, range: string) {
   return useQuery({
     queryKey: ["signals", uuid, range],

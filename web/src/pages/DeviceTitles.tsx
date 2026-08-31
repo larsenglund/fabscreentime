@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ChevronLeft, Search } from "lucide-react";
-import { useDevice, useTitles } from "../lib/api";
+import { ChevronLeft, Loader2, Search } from "lucide-react";
+import { useClearTitles, useDevice, useTitles } from "../lib/api";
 import { fmtMinutes, ago } from "../lib/format";
 import { RangeSwitcher, type RangeKey } from "../components/RangeSwitcher";
 import { CardSection } from "../components/ui/card";
+import { Button } from "../components/ui/button";
 import { Skeleton, Muted } from "../components/ui/skeleton";
 
 const inputCls =
@@ -29,6 +30,25 @@ export function DeviceTitles() {
   const rows = titles.data?.titles ?? [];
   const apps = titles.data?.apps ?? [];
   const filtering = !!exe || !!q;
+
+  // Password-gated "wipe all logged titles" (a light guard, checked server-side).
+  const clear = useClearTitles(uuid);
+  const [confirming, setConfirming] = useState(false);
+  const [pw, setPw] = useState("");
+  function submitClear() {
+    if (clear.isPending || !pw) return;
+    clear.mutate(pw, {
+      onSuccess: () => {
+        setConfirming(false);
+        setPw("");
+      },
+    });
+  }
+  function cancelClear() {
+    setConfirming(false);
+    setPw("");
+    clear.reset();
+  }
 
   return (
     <div className="space-y-6">
@@ -122,6 +142,64 @@ export function DeviceTitles() {
               {rows.length >= 200 ? " (showing the top 200)" : ""}
             </div>
           </>
+        )}
+      </CardSection>
+
+      <CardSection title="Clear logged titles">
+        <p className="max-w-2xl text-sm text-muted-foreground">
+          Permanently erase every window title recorded for this computer, across all time.
+          Screentime, top apps, and everything else are kept — only the titles are removed. This
+          can't be undone.
+        </p>
+        {!confirming ? (
+          <Button
+            variant="danger"
+            size="sm"
+            className="mt-3"
+            onClick={() => {
+              clear.reset();
+              setConfirming(true);
+            }}
+          >
+            Clear all logged titles…
+          </Button>
+        ) : (
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input
+              type="password"
+              autoFocus
+              value={pw}
+              onChange={(e) => setPw(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitClear();
+                if (e.key === "Escape") cancelClear();
+              }}
+              placeholder="Password"
+              aria-label="Password to clear titles"
+              className={inputCls + " sm:w-48"}
+            />
+            <div className="flex gap-2">
+              <Button variant="danger" size="sm" onClick={submitClear} disabled={clear.isPending || !pw}>
+                {clear.isPending && <Loader2 className="size-4 animate-spin" />}
+                Erase titles
+              </Button>
+              <Button variant="ghost" size="sm" onClick={cancelClear} disabled={clear.isPending}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+        {clear.isError && (
+          <p className="mt-2 text-xs text-danger">
+            {(clear.error as Error)?.message === "wrong-password"
+              ? "Wrong password."
+              : "Couldn't clear titles. Try again."}
+          </p>
+        )}
+        {clear.isSuccess && !confirming && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Cleared {clear.data?.cleared ?? 0} logged {clear.data?.cleared === 1 ? "title" : "titles"}.
+          </p>
         )}
       </CardSection>
     </div>
