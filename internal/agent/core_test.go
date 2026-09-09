@@ -11,13 +11,14 @@ import (
 )
 
 type fakeUploader struct {
-	fail       bool
-	gotBatch   int
-	gotEvents  int
-	gotBuild   int64
-	serverTS   int64
-	updateSM   *shared.SignedManifest
-	updateFlag bool
+	fail        bool
+	gotBatch    int
+	gotSampleTS int64
+	gotEvents   int
+	gotBuild    int64
+	serverTS    int64
+	updateSM    *shared.SignedManifest
+	updateFlag  bool
 }
 
 func (f *fakeUploader) Upload(_ context.Context, req shared.IngestRequest) (shared.IngestResponse, error) {
@@ -25,6 +26,9 @@ func (f *fakeUploader) Upload(_ context.Context, req shared.IngestRequest) (shar
 		return shared.IngestResponse{}, errors.New("network down")
 	}
 	f.gotBatch = len(req.Samples)
+	if len(req.Samples) > 0 {
+		f.gotSampleTS = req.Samples[0].ClientTS
+	}
 	f.gotEvents = len(req.Events)
 	f.gotBuild = req.AgentBuild
 	return shared.IngestResponse{
@@ -219,5 +223,104 @@ func TestDDCSaysOff(t *testing.T) {
 		if got := ddcSaysOff(c.power, c.armed); got != c.want {
 			t.Errorf("ddcSaysOff(%d, %v) = %v, want %v", c.power, c.armed, got, c.want)
 		}
+	}
+}
+
+// blockingSampler blocks in Sample until released — standing in for the Win32
+// or file-I/O call that wedged a production agent for a day.
+type blockingSampler struct {
+	release chan struct{}
+	started chan struct{}
+	once    bool
+}
+
+func (b *blockingSampler) Sample() (Reading, error) {
+	if !b.once {
+		b.once = true
+		close(b.started)
+		<-b.release
+	}
+	return Reading{MonitorsActive: 1, DisplayPower: -1, DDCPower: DDCNotSampled}, nil
+}
+
+func TestRunKeepsTickingWhileASampleIsStuck(t *testing.T) {
+	s := &blockingSampler{release: make(chan struct{}), started: make(chan struct{})}
+	q, err := NewQueue(filepath.Join(t.TempDir(), "queue.json"), 50)
+	if err != nil {
+		t.Fatalf("NewQueue: %v", err)
+	}
+	up := &fakeUploader{}
+	a := New(Config{DeviceUUID: "dev-1", Interval: 5 * time.Millisecond}, s, q, up, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { a.Run(ctx); close(done) }()
+
+	<-s.started // the first cycle is now wedged inside Sample
+	// The loop must stay responsive: without the watchdog it would be blocked in
+	// Sample with it, and the agent would log nothing until the next reboot.
+	time.Sleep(50 * time.Millisecond)
+	if got := a.tickStalledFor(); got == 0 {
+		t.Fatal("watchdog does not see the stuck cycle")
+	}
+	close(s.release)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel — the loop was blocked by the stuck cycle")
+	}
+}
+
+func TestRunRestartsWhenACycleNeverReturns(t *testing.T) {
+	s := &blockingSampler{release: make(chan struct{}), started: make(chan struct{})}
+	defer close(s.release)
+	q, err := NewQueue(filepath.Join(t.TempDir(), "queue.json"), 50)
+	if err != nil {
+		t.Fatalf("NewQueue: %v", err)
+	}
+	stalled := make(chan struct{})
+	a := New(Config{
+		DeviceUUID: "dev-1",
+		Interval:   5 * time.Millisecond,
+		StallAfter: 20 * time.Millisecond,
+		OnStall:    func() { close(stalled) },
+	}, s, q, &fakeUploader{}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.Run(ctx)
+
+	select {
+	case <-stalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchdog never fired for a cycle that stopped returning")
+	}
+}
+
+func TestTickStampsTheSampleWhenTheCycleStarts(t *testing.T) {
+	// A slow sampler must not date its reading late: production samples drifted
+	// off the 1/min grid by however long Sample() took.
+	up := &fakeUploader{}
+	a, q, cfg := newTestAgentWithUpdater(t, up, nil)
+	clock := cfg.Now()
+	a.cfg.Now = func() time.Time {
+		now := clock
+		clock = clock.Add(30 * time.Second) // every call advances: a slow cycle
+		return now
+	}
+	start := clock
+	a.Tick(context.Background())
+
+	batch := q.Snapshot()
+	if len(batch) != 0 {
+		t.Fatalf("queue should be drained after a successful flush, got %d", len(batch))
+	}
+	if up.gotBatch != 1 {
+		t.Fatalf("uploaded %d samples, want 1", up.gotBatch)
+	}
+	if got, want := up.gotSampleTS, start.Unix(); got != want {
+		t.Errorf("sample stamped %d, want the cycle's start %d", got, want)
 	}
 }

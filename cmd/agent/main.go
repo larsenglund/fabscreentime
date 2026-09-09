@@ -110,6 +110,11 @@ func main() {
 	}
 	hostname, _ := os.Hostname()
 
+	// Bring the autostart task up to date if an older agent registered it. This
+	// is what gets a supervisor back in front of a self-updated agent, which is
+	// otherwise an orphan no scheduled task is watching.
+	agent.EnsureAutostart(serverURL)
+
 	// Crash-loop auto-rollback (PLAN.md §5.4): if this build has restarted several
 	// times without ever checking in, it's a bad update — restore the previous
 	// binary and relaunch, quarantining the bad build so it isn't re-applied.
@@ -146,6 +151,7 @@ func main() {
 		Build:          build,
 		Interval:       *interval,
 		OnFirstCheckIn: func() { agent.MarkCheckedIn(*dataDir, build) },
+		OnStall:        restartWedged,
 	}, agent.NewSampler(), queue, agent.NewHTTPUploader(serverURL, creds.APIToken), updater)
 
 	log.Printf("agent %s (build %d) starting: device=%s host=%s server=%s interval=%s datadir=%s",
@@ -155,6 +161,22 @@ func main() {
 	// Run only returns on graceful shutdown (ctx cancelled). Record it so this
 	// stop/reboot isn't miscounted as a crash on the next start (§5.4).
 	agent.MarkCleanExit(*dataDir, build)
+}
+
+// restartWedged replaces this process after the watchdog found a sample cycle
+// that stopped returning. A goroutine stuck in a Win32 or file-I/O call is
+// unrecoverable in-process, so the only way back to logging without waiting for
+// the user's next reboot is a fresh process. Never returns.
+func restartWedged() {
+	exe, err := os.Executable()
+	if err != nil {
+		log.Fatalf("agent wedged and cannot find its own binary to relaunch (%v); exiting so the scheduled task restarts it", err)
+	}
+	agent.Relaunch(exe) // exits this process on success
+	// Relaunch only returns if it could not spawn a replacement. Exit non-zero
+	// so the Scheduled Task's RestartOnFailure gets its turn — exiting 0 here
+	// would leave the machine with no agent at all until the next logon.
+	log.Fatal("agent wedged and could not relaunch; exiting so the scheduled task restarts it")
 }
 
 // resolveCredentials returns the server URL and durable credentials, enrolling on

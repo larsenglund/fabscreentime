@@ -3,8 +3,10 @@
 package agent
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"os/user"
@@ -15,6 +17,11 @@ import (
 )
 
 const taskName = "FabScreenTimeAgent"
+
+// taskMarker stamps the task definition with the template that produced it, so
+// a newer agent can tell an outdated registration from a current one and repair
+// it (EnsureAutostart). Bump it whenever buildTaskXML changes meaningfully.
+const taskMarker = "task-v2"
 
 // InstallDir is the install location: %ProgramData%\FabScreenTime.
 //
@@ -54,6 +61,17 @@ func Install(serverURL string) error {
 			return err
 		}
 	}
+	if err := registerTask(dir, target, serverURL); err != nil {
+		return err
+	}
+	_ = runSchtasks("/Run", "/TN", taskName) // start now, no logout needed
+	return nil
+}
+
+// registerTask writes the task manifest and (re-)registers it, replacing any
+// existing definition. Registering over a running task leaves that instance
+// running; it only changes what the next start uses.
+func registerTask(dir, target, serverURL string) error {
 	u, err := user.Current()
 	if err != nil {
 		return err
@@ -63,12 +81,49 @@ func Install(serverURL string) error {
 		return err
 	}
 	defer os.Remove(xmlPath)
+	return runSchtasks("/Create", "/TN", taskName, "/XML", xmlPath, "/F")
+}
 
-	if err := runSchtasks("/Create", "/TN", taskName, "/XML", xmlPath, "/F"); err != nil {
-		return err
+// EnsureAutostart re-registers the autostart task when it is missing or was
+// written by an older agent. The task definition is only ever written by the
+// installer, so without this a fix to it would never reach the installed fleet —
+// and the fleet is exactly where it is needed: after a self-update the running
+// agent is a child of a task instance that has already finished, so nothing
+// supervises it any more. The refreshed definition adds a repeating trigger that
+// starts the agent again if it is not running (the single-instance mutex and
+// IgnoreNew keep that from ever double-starting one).
+//
+// It is deliberately inert unless this process IS the installed copy: a dev run
+// or a manual double-click from elsewhere must never touch the user's autostart.
+func EnsureAutostart(serverURL string) {
+	dir := InstallDir()
+	target := filepath.Join(dir, "agent.exe")
+	self, err := os.Executable()
+	if err != nil || !strings.EqualFold(filepath.Clean(self), filepath.Clean(target)) {
+		return
 	}
-	_ = runSchtasks("/Run", "/TN", taskName) // start now, no logout needed
-	return nil
+	if taskIsCurrent() {
+		return
+	}
+	log.Print("autostart task is missing or outdated; re-registering it")
+	if err := registerTask(dir, target, serverURL); err != nil {
+		log.Printf("autostart repair failed: %v", err)
+		return
+	}
+	log.Print("autostart task re-registered")
+}
+
+// taskIsCurrent reports whether the registered task carries the current
+// template's marker. schtasks emits UTF-16, so the NUL bytes are stripped before
+// looking for the (ASCII) marker.
+func taskIsCurrent() bool {
+	cmd := exec.Command("schtasks.exe", "/Query", "/TN", taskName, "/XML", "ONE")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000} // CREATE_NO_WINDOW
+	out, err := cmd.Output()
+	if err != nil {
+		return false // not registered (or unreadable) — treat as needing repair
+	}
+	return bytes.Contains(bytes.ReplaceAll(out, []byte{0}, nil), []byte(taskMarker))
 }
 
 // Uninstall stops and removes the Scheduled Task, deletes the data files, and
@@ -83,7 +138,7 @@ func Uninstall() error {
 	dir := InstallDir()
 	// Data files first (not write-locked), so they're gone even if the exe/dir
 	// removal is delayed.
-	for _, f := range []string{"credentials.json", "queue.json", "agent.log", "update-state.json", "enroll.json", "task.xml"} {
+	for _, f := range []string{"credentials.json", "queue.json", "agent.log", "agent.log.1", "update-state.json", "enroll.json", "task.xml"} {
 		_ = os.Remove(filepath.Join(dir, f))
 	}
 	scheduleCleanup(dir)
@@ -117,13 +172,21 @@ func buildTaskXML(userID, command, arguments string) string {
 	return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>FabScreenTime screentime logging agent</Description>
+    <Description>FabScreenTime screentime logging agent [` + taskMarker + `]</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
       <UserId>` + esc(userID) + `</UserId>
     </LogonTrigger>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT15M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2020-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">

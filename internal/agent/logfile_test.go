@@ -48,3 +48,67 @@ func TestTolerantWriterSwallowsErrors(t *testing.T) {
 type failWriter struct{}
 
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("no stderr") }
+
+// The run that fails is the one worth reading, and it is always followed by a
+// restart. Truncating at startup destroyed exactly that evidence.
+func TestSetupFileLoggingKeepsThePreviousRun(t *testing.T) {
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, logFileName)
+	oversized := append(make([]byte, maxLogBytes), []byte("what-the-last-run-was-doing")...)
+	if err := os.WriteFile(path, oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := SetupFileLogging(dir)
+	if f == nil {
+		t.Fatal("SetupFileLogging returned nil")
+	}
+	defer f.Close()
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() > maxLogBytes {
+		t.Errorf("oversized log was not rotated: still %d bytes", fi.Size())
+	}
+	prev, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("previous run's log was not kept: %v", err)
+	}
+	if !strings.Contains(string(prev), "what-the-last-run-was-doing") {
+		t.Error("agent.log.1 does not hold the previous run's output")
+	}
+}
+
+// A long-lived agent never reaches the startup check, so the writer has to
+// rotate on its own or the "bounded" log grows without bound.
+func TestRotatingWriterRotatesWhileRunning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, logFileName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &rotatingWriter{f: f, path: path}
+	chunk := make([]byte, 64<<10)
+	for written := 0; written <= 2*maxLogBytes; written += len(chunk) {
+		if _, err := w.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.f.Close()
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() > maxLogBytes {
+		t.Errorf("log grew to %d bytes without rotating (cap %d)", fi.Size(), maxLogBytes)
+	}
+	if _, err := os.Stat(path + ".1"); err != nil {
+		t.Errorf("no rotated generation kept: %v", err)
+	}
+}

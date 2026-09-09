@@ -23,3 +23,6 @@ func Install(string) error { return errWindowsOnly }
 
 // Uninstall is a no-op off Windows.
 func Uninstall() error { return errWindowsOnly }
+
+// EnsureAutostart is a no-op off Windows (there is no Scheduled Task).
+func EnsureAutostart(string) {}

@@ -11,6 +11,11 @@ import (
 
 const maxPendingEvents = 4096 // bounded so a long outage can't grow it unbounded
 
+// defaultStallAfter is how long one sample cycle may stay in flight before the
+// agent declares itself wedged (see Run). Generous: a slow disk or a 30 s upload
+// timeout must never trip it, only a cycle that has genuinely stopped returning.
+const defaultStallAfter = 5 * time.Minute
+
 // Uploader sends a batch to the backend and returns the parsed response.
 // Abstracted so the core can be tested without a real HTTP server.
 type Uploader interface {
@@ -36,6 +41,13 @@ type Config struct {
 	// OnFirstCheckIn fires once after the first successful upload — used to commit
 	// a freshly-updated build so a later restart isn't mistaken for a crash (§5.4).
 	OnFirstCheckIn func()
+	// OnStall fires when a sample cycle has been stuck longer than StallAfter.
+	// A goroutine wedged in a Win32 or file-I/O call can never be reclaimed, so
+	// the only real recovery is a new process — main wires this to a relaunch.
+	// nil disables the watchdog (tests, and the non-Windows dev build).
+	OnStall func()
+	// StallAfter overrides defaultStallAfter. Injectable for tests.
+	StallAfter time.Duration
 }
 
 // Agent samples once per interval, buffers to a bounded queue, and flushes the
@@ -52,6 +64,8 @@ type Agent struct {
 	pendingEvents []shared.MonitorEvent
 	lastMonitorOn int // -1 unknown, else last observed composite state
 	checkedIn     bool
+	tickBusy      bool      // a sample cycle is in flight
+	tickStarted   time.Time // when that cycle started, for the stall watchdog
 }
 
 // New wires an agent together. updater may be nil to disable self-update.
@@ -151,11 +165,15 @@ func deriveMonitorOn(r Reading) int {
 
 // Tick performs one sample → enqueue → flush cycle. Exported for tests.
 func (a *Agent) Tick(ctx context.Context) {
+	// Stamp the reading when the cycle starts, not when the sampler returns: a
+	// sampler that takes half a minute must not date its reading half a minute
+	// late, which showed up in production as samples drifting off the 1/min grid.
+	ts := a.cfg.Now().Unix()
 	if r, err := a.sampler.Sample(); err != nil {
 		log.Printf("sample error: %v", err)
 	} else {
 		s := shared.Sample{
-			ClientTS:       a.cfg.Now().Unix(),
+			ClientTS:       ts,
 			MonitorsActive: r.MonitorsActive,
 			DisplayPower:   r.DisplayPower,
 			DDCPower:       r.DDCPower,
@@ -204,10 +222,12 @@ func (a *Agent) flush(ctx context.Context) {
 		}
 	}
 	if resp.ServerTime > 0 {
+		a.mu.Lock()
 		a.clockSkew = time.Duration(resp.ServerTime-a.cfg.Now().Unix()) * time.Second
+		a.mu.Unlock()
 	}
 	log.Printf("uploaded %d samples (accepted %d, queued now %d, clock skew %s)",
-		len(batch), resp.Accepted, a.queue.Len(), a.clockSkew)
+		len(batch), resp.Accepted, a.queue.Len(), a.ClockSkew())
 
 	// Piggybacked update check (PLAN.md §5.1). The agent evaluates the signed
 	// manifest whenever one is present — it does not trust the backend's
@@ -219,23 +239,106 @@ func (a *Agent) flush(ctx context.Context) {
 }
 
 // ClockSkew returns the last observed offset between server and local clocks.
-func (a *Agent) ClockSkew() time.Duration { return a.clockSkew }
+func (a *Agent) ClockSkew() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.clockSkew
+}
+
+// startTick runs one cycle on its own goroutine, so a cycle that blocks — a
+// wedged Win32 call, real-time AV sitting on the queue file — cannot stop the
+// loop from noticing. It reports false if the previous cycle is still in flight.
+func (a *Agent) startTick(ctx context.Context) bool {
+	a.mu.Lock()
+	if a.tickBusy {
+		a.mu.Unlock()
+		return false
+	}
+	a.tickBusy = true
+	a.tickStarted = a.cfg.Now()
+	a.mu.Unlock()
+
+	go func() {
+		defer func() {
+			a.mu.Lock()
+			a.tickBusy = false
+			a.mu.Unlock()
+		}()
+		a.Tick(ctx)
+	}()
+	return true
+}
+
+// tickStalledFor reports how long the in-flight cycle has been running, or 0 if
+// none is.
+func (a *Agent) tickStalledFor() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.tickBusy {
+		return 0
+	}
+	return a.cfg.Now().Sub(a.tickStarted)
+}
+
+func (a *Agent) tickInFlight() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.tickBusy
+}
+
+// awaitTick waits up to d for an in-flight cycle to finish, so an ordinary
+// shutdown doesn't abandon one mid-upload. Bounded on purpose: a wedged cycle
+// must never be able to hold up a reboot.
+func (a *Agent) awaitTick(d time.Duration) {
+	deadline := time.Now().Add(d)
+	for a.tickInFlight() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (a *Agent) stallAfter() time.Duration {
+	if a.cfg.StallAfter > 0 {
+		return a.cfg.StallAfter
+	}
+	return defaultStallAfter
+}
 
 // Run samples immediately, then every interval until ctx is cancelled. If the
 // sampler can probe monitor state, a faster poll loop records on/off transitions.
+//
+// Cycles run on their own goroutine and never overlap, so one slow cycle costs
+// at most the ticks it overruns instead of stopping the agent. A cycle that
+// never returns is unrecoverable in-process — a goroutine stuck in a Win32 or
+// file-I/O call cannot be cancelled — so after StallAfter the watchdog hands
+// over to OnStall, which restarts the process. Without that, a single wedged
+// call silently ends logging until the machine is next rebooted, which is
+// exactly how a device went dark for a day in production.
 func (a *Agent) Run(ctx context.Context) {
 	if p, ok := a.sampler.(MonitorProber); ok {
 		go a.monitorPollLoop(ctx, p)
 	}
-	a.Tick(ctx)
+	a.startTick(ctx)
 	t := time.NewTicker(a.cfg.Interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			a.awaitTick(2 * time.Second)
 			return
 		case <-t.C:
-			a.Tick(ctx)
+			if a.startTick(ctx) {
+				continue
+			}
+			stuck := a.tickStalledFor()
+			if stuck == 0 {
+				continue // it finished in the meantime
+			}
+			log.Printf("sample cycle still running after %s; skipping this tick", stuck.Round(time.Second))
+			if stuck >= a.stallAfter() && a.cfg.OnStall != nil {
+				log.Printf("sample cycle wedged for %s — restarting the agent", stuck.Round(time.Second))
+				a.cfg.OnStall()
+				return
+			}
 		}
 	}
 }

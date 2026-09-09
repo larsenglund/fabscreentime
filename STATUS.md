@@ -251,6 +251,21 @@ scripts/                    build-ui.ps1, release-local.ps1, build.sh
   Proxmox. `.db` files are cross-platform.
 - **CI** builds/tests on Linux and runs the real Win32 code on `windows-latest`; keep it green
   (`gofmt`, `go vet`, `go test`).
+- **Nothing supervises a self-updated agent.** `Relaunch` spawns a child and exits, so after an
+  auto-update the running agent is an orphan — the Scheduled Task instance that started it has
+  already finished, and its `RestartOnFailure` no longer applies. Two things cover that now, and
+  both must stay: the **stall watchdog** in `Agent.Run` (a sample cycle that stops returning is
+  unrecoverable in-process, so after `StallAfter` the agent relaunches itself) and the task's
+  **repeating trigger**, which starts the agent again if no instance is running. `EnsureAutostart`
+  is what gets that trigger onto already-installed devices — the task definition is otherwise only
+  ever written by the installer, so a fix to it would never reach the fleet. Bump `taskMarker` when
+  you change `buildTaskXML`, or the repair won't know it needs to run.
+- **Sample cycles run on their own goroutine** and never overlap. Win32 calls and file I/O under
+  real-time AV can block for minutes; keeping them off the loop is what lets the watchdog notice.
+  The sample is stamped when the cycle *starts*, so a slow sampler can't date its reading late.
+- **The agent log rotates** (`agent.log` + `agent.log.1`), during the run and not only at startup.
+  These failures always end in a restart, so don't go back to truncating at startup — that throws
+  away the only record of what the agent was doing when it stopped.
 - **Self-update mutex handoff:** the child process acquires the single-instance mutex with a short
   retry, so a relaunch during update doesn't race the exiting parent into "another instance is
   running; exiting" and leave *no* agent running. Don't remove the retry loop in `cmd/agent/main.go`.

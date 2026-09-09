@@ -13,8 +13,11 @@ import (
 // once installed (PLAN.md §4.6).
 const logFileName = "agent.log"
 
-// maxLogBytes caps the log; on startup an oversized file is truncated so the log
-// can never grow unbounded on a long-lived install.
+// maxLogBytes caps one log generation. Two are kept (agent.log + agent.log.1),
+// so the log is bounded at 2 MiB while still holding the run BEFORE the current
+// one. That predecessor is the whole point: the interesting failures here end in
+// a restart, and truncating at startup threw away the only record of what the
+// agent was doing when it stopped.
 const maxLogBytes = 1 << 20 // 1 MiB
 
 // SetupFileLogging routes the standard logger to dir/agent.log (in addition to
@@ -26,9 +29,7 @@ func SetupFileLogging(dir string) *os.File {
 		return nil
 	}
 	path := filepath.Join(dir, logFileName)
-	if fi, err := os.Stat(path); err == nil && fi.Size() > maxLogBytes {
-		_ = os.Truncate(path, 0)
-	}
+	rotateIfLarge(path)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil
@@ -38,9 +39,61 @@ func SetupFileLogging(dir string) *os.File {
 	// valid stderr — so a plain MultiWriter(os.Stderr, f) writes nothing to the
 	// file. Wrap stderr so its (expected) failures are swallowed, keeping the
 	// file write reachable; stderr still works in console/dev runs.
-	log.SetOutput(io.MultiWriter(tolerantWriter{os.Stderr}, f))
+	log.SetOutput(io.MultiWriter(tolerantWriter{os.Stderr}, &rotatingWriter{f: f, path: path}))
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	return f
+}
+
+// rotateIfLarge moves an oversized log aside as agent.log.1, replacing any
+// previous generation. Rotating rather than truncating is what keeps the run
+// that failed readable after the restart that fixed it.
+func rotateIfLarge(path string) {
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() <= maxLogBytes {
+		return
+	}
+	_ = os.Remove(path + ".1")
+	if err := os.Rename(path, path+".1"); err != nil {
+		_ = os.Truncate(path, 0) // rotation blocked (AV, open handle) — cap it anyway
+	}
+}
+
+// rotatingWriter rotates the log while the agent runs, not only at startup. An
+// agent that stays up for weeks never reaches the startup check, so without this
+// the "bounded" log grows without bound exactly on the long-lived installs.
+type rotatingWriter struct {
+	f    *os.File
+	path string
+	n    int64 // bytes written since the last size check
+}
+
+// checkEvery bounds how often the writer stats the file — a syscall per log line
+// would be silly for a log this quiet.
+const checkEvery = 64 << 10 // 64 KiB
+
+func (w *rotatingWriter) Write(p []byte) (int, error) {
+	n, err := w.f.Write(p)
+	w.n += int64(n)
+	if w.n < checkEvery {
+		return n, err
+	}
+	w.n = 0
+	if fi, e := w.f.Stat(); e != nil || fi.Size() <= maxLogBytes {
+		return n, err
+	}
+	// Reopen after rotating: the old handle keeps writing to the renamed file.
+	w.f.Close()
+	rotateIfLarge(w.path)
+	if f, e := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); e == nil {
+		w.f = f
+	} else {
+		// Reopen failed — put the old handle back so logging keeps going
+		// somewhere rather than dying silently.
+		if f, e := os.OpenFile(w.path+".1", os.O_WRONLY|os.O_APPEND, 0o600); e == nil {
+			w.f = f
+		}
+	}
+	return n, err
 }
 
 // tolerantWriter forwards to w but never reports an error, so a dead stderr
