@@ -21,7 +21,7 @@ const taskName = "FabScreenTimeAgent"
 // taskMarker stamps the task definition with the template that produced it, so
 // a newer agent can tell an outdated registration from a current one and repair
 // it (EnsureAutostart). Bump it whenever buildTaskXML changes meaningfully.
-const taskMarker = "task-v2"
+const taskMarker = "task-v3"
 
 // InstallDir is the install location: %ProgramData%\FabScreenTime.
 //
@@ -90,8 +90,8 @@ func registerTask(dir, target, serverURL string) error {
 // and the fleet is exactly where it is needed: after a self-update the running
 // agent is a child of a task instance that has already finished, so nothing
 // supervises it any more. The refreshed definition adds a repeating trigger that
-// starts the agent again if it is not running (the single-instance mutex and
-// IgnoreNew keep that from ever double-starting one).
+// starts the agent again if it is not running; the single-instance mutex keeps a
+// firing that lands on a still-healthy agent from ever double-starting one.
 //
 // It is deliberately inert unless this process IS the installed copy: a dev run
 // or a manual double-click from elsewhere must never touch the user's autostart.
@@ -196,7 +196,14 @@ func buildTaskXML(userID, command, arguments string) string {
     </Principal>
   </Principals>
   <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <!-- Parallel, not IgnoreNew: every repeating-trigger firing must actually
+         launch a process so a dead agent is replaced within the interval. With
+         IgnoreNew, Task Scheduler's own view of "an instance is already running"
+         can wedge after a crash and silently stop restarting it (a device stayed
+         dark for days that way). The agent's single-instance mutex — not this
+         policy — is what prevents a real double-run: the probe this spawns while
+         the agent is healthy loses the mutex and exits in seconds. -->
+    <MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowHardTerminate>true</AllowHardTerminate>

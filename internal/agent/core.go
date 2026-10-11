@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -260,6 +261,14 @@ func (a *Agent) startTick(ctx context.Context) bool {
 
 	go func() {
 		defer func() {
+			// A panic in any goroutine takes the whole process down, and this
+			// build has no console, so the trace never reaches a terminal — the
+			// agent would just vanish and stay gone until the next reboot (exactly
+			// how a device went dark for days in production). Recover it, log the
+			// trace to agent.log, and let the next tick carry on.
+			if r := recover(); r != nil {
+				log.Printf("sample cycle panicked (recovered, agent continues): %v\n%s", r, debug.Stack())
+			}
 			a.mu.Lock()
 			a.tickBusy = false
 			a.mu.Unlock()
@@ -315,7 +324,14 @@ func (a *Agent) stallAfter() time.Duration {
 // exactly how a device went dark for a day in production.
 func (a *Agent) Run(ctx context.Context) {
 	if p, ok := a.sampler.(MonitorProber); ok {
-		go a.monitorPollLoop(ctx, p)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("monitor poll loop panicked (recovered, agent continues): %v\n%s", r, debug.Stack())
+				}
+			}()
+			a.monitorPollLoop(ctx, p)
+		}()
 	}
 	a.startTick(ctx)
 	t := time.NewTicker(a.cfg.Interval)

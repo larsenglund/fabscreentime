@@ -10,7 +10,9 @@ import (
 // The task manifest is the agent's only supervisor. A self-updated agent is an
 // orphan the logon trigger cannot reach until the next reboot, so the definition
 // must carry a repeating trigger — and a marker, or EnsureAutostart cannot tell
-// an outdated registration from a current one.
+// an outdated registration from a current one. The policy must be Parallel so a
+// firing that lands on a dead agent actually launches a replacement; the
+// single-instance mutex, not the policy, prevents a real double-run.
 func TestTaskXMLCarriesTheWatchdogTriggerAndMarker(t *testing.T) {
 	xml := buildTaskXML(`DOMAIN\user`, `C:\ProgramData\FabScreenTime\agent.exe`, "-server https://example.test")
 	for _, want := range []string{
@@ -18,10 +20,13 @@ func TestTaskXMLCarriesTheWatchdogTriggerAndMarker(t *testing.T) {
 		"<TimeTrigger>",
 		"<Interval>PT15M</Interval>",
 		"<LogonTrigger>",
-		"<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+		"<MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>",
 	} {
 		if !strings.Contains(xml, want) {
 			t.Errorf("task XML is missing %q", want)
 		}
+	}
+	if strings.Contains(xml, "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>") {
+		t.Error("task XML still uses IgnoreNew; a crash can wedge the restart trigger")
 	}
 }

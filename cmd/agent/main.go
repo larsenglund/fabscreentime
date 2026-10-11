@@ -39,15 +39,6 @@ func main() {
 	uninstall := flag.Bool("uninstall", false, "remove the autostart Scheduled Task and exit")
 	flag.Parse()
 
-	// Route logging to a file as early as possible (after datadir is known) so a
-	// fatal during startup is captured for the silent, console-less build. -once
-	// stays on stderr only (it prints JSON to stdout for CI).
-	if !*once {
-		if f := agent.SetupFileLogging(*dataDir); f != nil {
-			defer f.Close()
-		}
-	}
-
 	if *once {
 		r, err := agent.NewSampler().Sample()
 		if err != nil {
@@ -58,29 +49,39 @@ func main() {
 		return
 	}
 
-	if *install {
-		if err := agent.Install(*server); err != nil {
-			log.Fatalf("install: %v", err)
+	// install/uninstall are one-shots; log to the file for diagnostics, then exit.
+	if *install || *uninstall {
+		if f := agent.SetupFileLogging(*dataDir); f != nil {
+			defer f.Close()
 		}
-		log.Printf("installed and started; reporting to %s", *server)
-		return
-	}
-	if *uninstall {
-		if err := agent.Uninstall(); err != nil {
-			log.Fatalf("uninstall: %v", err)
+		if *install {
+			if err := agent.Install(*server); err != nil {
+				log.Fatalf("install: %v", err)
+			}
+			log.Printf("installed and started; reporting to %s", *server)
+		} else {
+			if err := agent.Uninstall(); err != nil {
+				log.Fatalf("uninstall: %v", err)
+			}
+			log.Print("uninstalled autostart task")
 		}
-		log.Print("uninstalled autostart task")
 		return
 	}
 
-	// One agent per user session — the update relaunch and a Task Scheduler
-	// trigger must not double-run (PLAN.md §5.2). Acquire the lock with a short
-	// retry: a self-update relaunch spawns the new process while the old one is
-	// still exiting, so the new one can momentarily see the old one's mutex. Retry
-	// for a few seconds so the handoff succeeds; a genuine second instance still
-	// gives up (harmlessly) after the wait. (Without this, an update could leave
-	// NO agent running — the new process exits on the lock and the task, having
-	// exited 0, never restarts.)
+	// One agent per user session — the update relaunch and the Task Scheduler
+	// trigger must not double-run (PLAN.md §5.2). The autostart task now uses
+	// MultipleInstancesPolicy=Parallel so every repeating-trigger firing actually
+	// launches (guaranteeing a dead agent is replaced within the interval), and
+	// THIS mutex — not the task policy — is what prevents a real double-run.
+	//
+	// Acquire it BEFORE opening the log file: while the agent is healthy, each
+	// firing spawns a probe that must lose the mutex and exit SILENTLY, without
+	// opening agent.log — otherwise ~96 probe processes a day would churn the file
+	// and fight the live agent's log rotation. Retry briefly so the self-update
+	// handoff still succeeds, where the relaunched child momentarily races the
+	// exiting parent for the lock. (Without that retry an update could leave NO
+	// agent running: the child exits on the lock and the parent's task instance,
+	// having exited 0, never restarts.)
 	var release func()
 	var gotLock bool
 	for i := 0; i < 30; i++ {
@@ -90,10 +91,16 @@ func main() {
 		time.Sleep(250 * time.Millisecond)
 	}
 	if !gotLock {
-		log.Print("another agent instance is already running; exiting")
-		return
+		return // another instance holds the lock (healthy agent, or a restart probe)
 	}
 	defer release()
+
+	// Only the winner of the single-instance lock opens the log, so agent.log has
+	// exactly one writer. A fatal from here on is captured for the console-less
+	// build; -once/install/uninstall are handled above.
+	if f := agent.SetupFileLogging(*dataDir); f != nil {
+		defer f.Close()
+	}
 
 	build, _ := strconv.ParseInt(Build, 10, 64)
 

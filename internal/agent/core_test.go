@@ -4,11 +4,56 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/larsenglund/fabscreentime/internal/shared"
 )
+
+// panicSampler panics on every Sample, counting how many times it was called.
+type panicSampler struct{ calls int64 }
+
+func (p *panicSampler) Sample() (Reading, error) {
+	atomic.AddInt64(&p.calls, 1)
+	panic("sampler boom")
+}
+
+func TestAgentSurvivesSamplerPanic(t *testing.T) {
+	// A panic in the sample-cycle goroutine must NOT take the process down: it is
+	// recovered and logged, and the agent keeps ticking. This build has no
+	// console, so before the recover() a single panic made the agent vanish with
+	// no trace and stay gone until the next reboot — a device went dark for days
+	// that way. If the recover() regressed, the first panic would crash this test
+	// binary instead of being caught here.
+	q, err := NewQueue(filepath.Join(t.TempDir(), "queue.json"), 5)
+	if err != nil {
+		t.Fatalf("NewQueue: %v", err)
+	}
+	s := &panicSampler{}
+	a := New(Config{DeviceUUID: "dev-1", Build: 3, Interval: 5 * time.Millisecond}, s, q, &fakeUploader{}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { a.Run(ctx); close(done) }()
+
+	// The agent must tick again after each recovered panic, not die on the first.
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt64(&s.calls) < 3 {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("sampler called only %d times; agent stopped ticking after a panic", atomic.LoadInt64(&s.calls))
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
 
 type fakeUploader struct {
 	fail        bool
