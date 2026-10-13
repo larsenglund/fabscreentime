@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronRight } from "lucide-react";
-import { useDevices, useSummary, useTrend, type DeviceSummary } from "../lib/api";
-import { fmtMinutes, ago, online, fmtClockSkew, CLOCK_SKEW_FLAG_SECONDS } from "../lib/format";
+import { useDevices, useSummary, useTrend, type DeviceStatus, type DeviceSummary } from "../lib/api";
+import { fmtMinutes, ago, online, fmtBoardID, fmtClockSkew, CLOCK_SKEW_FLAG_SECONDS } from "../lib/format";
 import { RangeSwitcher, type RangeKey } from "../components/RangeSwitcher";
 import { Kpi } from "../components/Kpi";
 import { CardSection } from "../components/ui/card";
@@ -88,6 +88,13 @@ export function Overview() {
   );
 }
 
+/** BoardID appends a computer's motherboard chipset ID to its status line. */
+function BoardID({ status }: { status: DeviceStatus }) {
+  const id = fmtBoardID(status.board_maker, status.board_code);
+  if (!id) return null;
+  return <span title="Motherboard, as identified by its chipset"> · {id}</span>;
+}
+
 function DeviceTable({
   devices,
   latestBuild,
@@ -110,6 +117,8 @@ function DeviceTable({
               <span className="truncate">
                 {status.agent_version ? `app v${status.agent_version} · ` : ""}
                 {ago(status.last_seen)}
+                {/* Last, so a narrow screen truncates it before the more useful "seen" time. */}
+                <BoardID status={status} />
               </span>
               {latestBuild > 0 && status.agent_build > 0 && status.agent_build < latestBuild && (
                 <span

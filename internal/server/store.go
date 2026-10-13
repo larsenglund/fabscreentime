@@ -416,16 +416,21 @@ func (s *Store) DeleteDevice(uuid string) (int64, error) {
 	return id, nil
 }
 
+// The board ID is read out of the stored inventory JSON. json_valid guards it:
+// a malformed blob must blank the ID, never fail the whole device list.
 const deviceStatusCols = `device_uuid, name, COALESCE(hostname, ''), COALESCE(last_seen, 0),
 	COALESCE(agent_version, ''), COALESCE(agent_build, 0), api_token_hash IS NOT NULL, revoked,
-	enroll_expires, COALESCE(enrolled_at, 0), log_titles, clock_skew_seconds`
+	enroll_expires, COALESCE(enrolled_at, 0), log_titles, clock_skew_seconds,
+	COALESCE(CASE WHEN json_valid(system_info) THEN json_extract(system_info, '$.board.hw_maker') END, ''),
+	COALESCE(CASE WHEN json_valid(system_info) THEN json_extract(system_info, '$.board.hw_code') END, '')`
 
 func scanDeviceStatus(sc interface{ Scan(...any) error }, now int64) (shared.DeviceStatus, error) {
 	var d shared.DeviceStatus
 	var apiSet, revoked, logTitles int
 	var enrollExpires, clockSkew sql.NullInt64
 	if err := sc.Scan(&d.DeviceUUID, &d.Name, &d.Hostname, &d.LastSeen,
-		&d.AgentVersion, &d.AgentBuild, &apiSet, &revoked, &enrollExpires, &d.EnrolledAt, &logTitles, &clockSkew); err != nil {
+		&d.AgentVersion, &d.AgentBuild, &apiSet, &revoked, &enrollExpires, &d.EnrolledAt, &logTitles, &clockSkew,
+		&d.BoardMaker, &d.BoardCode); err != nil {
 		return d, err
 	}
 	d.LogTitles = logTitles != 0

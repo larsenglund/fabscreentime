@@ -14,7 +14,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useSystemInfo, type DriveInfo, type MemoryModule, type SystemInfo } from "../lib/api";
-import { ago, fmtDiskSize, fmtMemory } from "../lib/format";
+import { ago, fmtBoardID, fmtDiskSize, fmtMemory } from "../lib/format";
 import { CardSection } from "./ui/card";
 import { Skeleton } from "./ui/skeleton";
 
@@ -134,11 +134,7 @@ function SystemInfoRows({ info }: { info: SystemInfo }) {
     );
   }
   if (boardName) {
-    const hwID = board?.hw_maker
-      ? board.hw_code?.startsWith("MS-")
-        ? `${board.hw_maker} ${board.hw_code}`
-        : board.hw_maker // other makers' codes are internal numbers, meaningless to a reader
-      : "";
+    const hwID = fmtBoardID(board?.hw_maker, board?.hw_code);
     rows.push(
       <Row key="board" icon={CircuitBoard} label="Motherboard">
         <Item

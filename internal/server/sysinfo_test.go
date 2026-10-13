@@ -63,6 +63,50 @@ func TestSystemInfoStoredAndServed(t *testing.T) {
 	}
 }
 
+// The overview's device list carries the board ID straight from the stored
+// inventory — and a corrupt inventory must blank it, never break the list.
+func TestDeviceListCarriesBoardID(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	srv, st := newTestServer(t, now)
+	h := srv.Handler()
+	uuid, token := enrollDevice(t, h, "speldator")
+	doIngest(t, h, token, shared.IngestRequest{
+		Samples:    []shared.Sample{{ClientTS: now.Unix(), MonitorOn: 1, Exe: "a.exe"}},
+		SystemInfo: &shared.SystemInfo{Board: &shared.BoardInfo{Product: "PRO Z690-P DDR4 (MS-7D36)", HWMaker: "MSI", HWCode: "MS-7B86"}},
+	})
+
+	listed := func() shared.DeviceStatus {
+		t.Helper()
+		var resp struct{ Devices []shared.DeviceStatus }
+		rec := doJSON(t, h, http.MethodGet, "/api/devices", "", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("device list status = %d", rec.Code)
+		}
+		mustJSON(t, rec.Body.Bytes(), &resp)
+		for _, d := range resp.Devices {
+			if d.DeviceUUID == uuid {
+				return d
+			}
+		}
+		t.Fatal("device missing from the list")
+		return shared.DeviceStatus{}
+	}
+	if d := listed(); d.BoardMaker != "MSI" || d.BoardCode != "MS-7B86" {
+		t.Fatalf("listed board = %q %q, want MSI MS-7B86", d.BoardMaker, d.BoardCode)
+	}
+
+	id, err := st.DeviceByToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSystemInfo(id, []byte(`{"board": not json`), now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if d := listed(); d.BoardMaker != "" || d.BoardCode != "" {
+		t.Fatalf("corrupt inventory produced board %q %q", d.BoardMaker, d.BoardCode)
+	}
+}
+
 func TestSanitizeSystemInfoBoundsInput(t *testing.T) {
 	long := strings.Repeat("é", 500) // multi-byte, so clipping must respect rune boundaries
 	in := &shared.SystemInfo{

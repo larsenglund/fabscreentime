@@ -25,6 +25,9 @@ export interface DeviceStatus {
   log_titles: boolean;
   clock_skew: number;
   clock_skew_known: boolean;
+  /** The board's chipset ID from its last hardware report ("" until reported). */
+  board_maker: string;
+  board_code: string;
 }
 
 export interface LatestAgent {

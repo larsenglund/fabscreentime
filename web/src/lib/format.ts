@@ -101,6 +101,14 @@ export function fmtDiskSize(bytes: number): string {
   return `${Math.round(bytes / 1e9)} GB`;
 }
 
+/** fmtBoardID renders a motherboard's chipset ID: "MSI MS-7B86". Only MSI's
+ *  code is a model code people can look up; other makers stamp internal
+ *  numbers, so just the maker is shown for them. "" when unknown. */
+export function fmtBoardID(maker?: string, code?: string): string {
+  if (!maker) return "";
+  return code?.startsWith("MS-") ? `${maker} ${code}` : maker;
+}
+
 /** shiftDay returns dayStr (YYYY-MM-DD) offset by n days. */
 export function shiftDay(dayStr: string, n: number): string {
   const d = new Date(dayStr + "T00:00:00Z");

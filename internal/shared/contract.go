@@ -228,6 +228,10 @@ type DeviceStatus struct {
 	LogTitles      bool   `json:"log_titles"`       // false = window titles are dropped (privacy opt-out, §9)
 	ClockSkew      int64  `json:"clock_skew"`       // last observed agent-minus-server clock offset, seconds (valid only if ClockSkewKnown)
 	ClockSkewKnown bool   `json:"clock_skew_known"` // false = the agent has never reported its wall-clock (old agent / not yet seen)
+	// The board's chipset ID from the last inventory (see BoardInfo.HWMaker /
+	// HWCode); empty until an agent that reports it has checked in.
+	BoardMaker string `json:"board_maker"`
+	BoardCode  string `json:"board_code"`
 }
 
 // DeviceEvent is one row of a device's audit trail — currently agent build
