@@ -9,6 +9,7 @@ import {
   MemoryStick,
   MonitorCog,
   Network,
+  TriangleAlert,
   Wifi,
   type LucideIcon,
 } from "lucide-react";
@@ -96,8 +97,12 @@ function SystemInfoRows({ info }: { info: SystemInfo }) {
           details={[
             ...moduleGroups(mods),
             memory.slots && mods.length ? `${mods.length} of ${plural(memory.slots, "slot")} used` : "",
+          ]}
+          warnings={[
             // A common, fixable slowdown: XMP/EXPO not enabled in the BIOS.
-            memory.speed_mts && rated > memory.speed_mts ? `sticks are rated for ${rated} MT/s` : "",
+            memory.speed_mts && rated > memory.speed_mts
+              ? `Running below the sticks' rated ${rated} MT/s — XMP/EXPO is probably off in the BIOS`
+              : "",
           ]}
         />
       </Row>,
@@ -106,17 +111,25 @@ function SystemInfoRows({ info }: { info: SystemInfo }) {
   if (gpus?.length) {
     rows.push(
       <Row key="gpu" icon={MonitorCog} label="Graphics">
-        {gpus.map((g, i) => (
-          <Item
-            key={i}
-            main={g.model}
-            details={[
-              !mentions(g.model, g.vendor) && g.vendor,
-              g.vram_bytes ? `${fmtMemory(g.vram_bytes)} video memory` : "",
-              g.maker ? `${g.maker} card` : "",
-            ]}
-          />
-        ))}
+        {gpus.map((g, i) => {
+          // With the card's own driver missing or broken, Windows falls back to
+          // its basic one: the model is then unknown, but the chip maker isn't.
+          const noDriver = /microsoft basic (display|render)/i.test(g.model);
+          return (
+            <Item
+              key={i}
+              main={noDriver ? `${g.vendor ?? "Unknown"} graphics card` : g.model}
+              details={[
+                !noDriver && !mentions(g.model, g.vendor) && g.vendor,
+                g.vram_bytes ? `${fmtMemory(g.vram_bytes)} video memory` : "",
+                g.maker ? `${g.maker} card` : "",
+              ]}
+              warnings={[
+                noDriver && "No graphics driver installed — Windows is using its basic fallback driver",
+              ]}
+            />
+          );
+        })}
       </Row>,
     );
   }
@@ -159,6 +172,7 @@ function SystemInfoRows({ info }: { info: SystemInfo }) {
         <Item
           main={[network.name, network.ipv4].filter(Boolean).join(" · ")}
           details={[network.kind, network.link_mbps ? fmtLink(network.link_mbps) : "", network.adapter]}
+          warnings={[slowWiredLink(network) && "A gigabit adapter connected at only 100 Mbps — usually a worn cable or a slow port"]}
         />
       </Row>,
     );
@@ -189,25 +203,47 @@ function Row({ icon: Icon, label, children }: { icon: LucideIcon; label: string;
   );
 }
 
-/** Item is one thing in a row: a main line plus a quieter line of details,
- *  with empty details dropped. */
+type Parts = (string | false | 0 | undefined | null)[];
+
+/** Item is one thing in a row: a main line, a quieter line of details, and any
+ *  warnings worth acting on. Empty parts are dropped. */
 function Item({
   main,
   details = [],
+  warnings = [],
   title,
 }: {
   main: ReactNode;
-  details?: (string | false | undefined | null)[];
+  details?: Parts;
+  warnings?: Parts;
   title?: string;
 }) {
   const shown = details.filter((d): d is string => !!d);
+  const warn = warnings.filter((w): w is string => !!w);
   return (
     <div title={title}>
       <div className="break-words font-medium">{main}</div>
       {shown.length > 0 && (
         <div className="mt-0.5 break-words text-xs text-muted-foreground">{shown.join(" · ")}</div>
       )}
+      {warn.map((w) => (
+        <div key={w} className="mt-1 flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+          <TriangleAlert className="mt-px size-3.5 shrink-0" aria-hidden="true" />
+          <span>{w}</span>
+        </div>
+      ))}
     </div>
+  );
+}
+
+/** slowWiredLink spots a gigabit-or-faster Ethernet adapter that negotiated a
+ *  slower link, which almost always means a damaged cable or a 100 Mbps port. */
+function slowWiredLink(n: NonNullable<SystemInfo["network"]>): boolean {
+  return (
+    n.kind === "Ethernet" &&
+    !!n.link_mbps &&
+    n.link_mbps < 1000 &&
+    /\b(gbe|gigabit|2\.5\s?g|5\s?g|10\s?g)/i.test(n.adapter ?? "")
   );
 }
 
