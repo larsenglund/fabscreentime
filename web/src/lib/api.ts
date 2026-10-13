@@ -108,7 +108,17 @@ export interface SystemInfo {
   cpu?: { model: string; vendor?: string; cores?: number; threads?: number };
   memory?: { total_bytes: number; type?: string; speed_mts?: number; slots?: number; modules?: MemoryModule[] };
   gpus?: GPUInfo[];
-  board?: { manufacturer?: string; product?: string; system_maker?: string; system_model?: string; bios?: string };
+  board?: {
+    manufacturer?: string;
+    product?: string;
+    system_maker?: string;
+    system_model?: string;
+    bios?: string;
+    /** The board's identity as stamped on its own chipset devices — independent
+     *  of the (editable) name above. For MSI, hw_code is the model code "MS-7B86". */
+    hw_maker?: string;
+    hw_code?: string;
+  };
   drives?: DriveInfo[];
   network?: { name?: string; kind?: string; adapter?: string; ipv4?: string; link_mbps?: number };
 }

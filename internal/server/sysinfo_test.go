@@ -31,6 +31,7 @@ func TestSystemInfoStoredAndServed(t *testing.T) {
 		Samples: sample,
 		SystemInfo: &shared.SystemInfo{
 			CPU:    &shared.CPUInfo{Model: "AMD Ryzen 5 2600 Six-Core Processor", Vendor: "AMD", Cores: 6, Threads: 12},
+			Board:  &shared.BoardInfo{Manufacturer: "MSI", Product: "PRO Z690-P DDR4 (MS-7D36)", HWMaker: "MSI", HWCode: "MS-7B86"},
 			Drives: []shared.DriveInfo{{Model: "INTEL SSDPEKNW010T8", Maker: "Intel", SizeBytes: 1024209543168, Bus: "NVMe", Media: "SSD"}},
 		},
 	})
@@ -40,6 +41,9 @@ func TestSystemInfoStoredAndServed(t *testing.T) {
 	}
 	if len(got.SystemInfo.Drives) != 1 || got.SystemInfo.Drives[0].Bus != "NVMe" {
 		t.Fatalf("drives = %+v", got.SystemInfo.Drives)
+	}
+	if b := got.SystemInfo.Board; b == nil || b.HWMaker != "MSI" || b.HWCode != "MS-7B86" {
+		t.Fatalf("board hardware identity lost on the way through: %+v", b)
 	}
 	if got.UpdatedAt != now.Unix() {
 		t.Fatalf("updated_at = %d, want %d", got.UpdatedAt, now.Unix())

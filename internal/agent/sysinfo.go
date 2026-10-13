@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/url"
@@ -743,31 +744,89 @@ func driveBrand(s string) string {
 	return ""
 }
 
-// --- GPUs -----------------------------------------------------------------------
+// --- PCI identities -------------------------------------------------------------
 
-// parsePCIInstance extracts the chip vendor and the board's subsystem vendor
-// from a PCI device-instance ID such as
+// pciID is a PCI function's chip identity (vendor, device) and its subsystem
+// identity (subVen, subDev): which company built the card or board it sits on.
+type pciID struct{ ven, dev, subVen, subDev uint16 }
+
+// parsePCIInstance extracts the IDs from a PCI device-instance ID such as
 // `PCI\VEN_10DE&DEV_1C03&SUBSYS_85AE1043&REV_A1\4&2B8260C3&0&0008`.
-func parsePCIInstance(id string) (ven, subsysVen uint16, ok bool) {
+func parsePCIInstance(id string) (pciID, bool) {
 	u := strings.ToUpper(id)
 	if !strings.HasPrefix(u, `PCI\`) {
-		return 0, 0, false
+		return pciID{}, false
 	}
-	hex16 := func(s string) (uint16, bool) {
-		v, err := strconv.ParseUint(s, 16, 16)
-		return uint16(v), err == nil
+	hex16 := func(s string) uint16 {
+		v, _ := strconv.ParseUint(s, 16, 16)
+		return uint16(v)
 	}
+	var p pciID
+	ok := false
 	for _, part := range strings.Split(strings.SplitN(u[4:], `\`, 2)[0], "&") {
 		switch {
 		case strings.HasPrefix(part, "VEN_") && len(part) >= 8:
-			ven, ok = hex16(part[4:8])
+			p.ven, ok = hex16(part[4:8]), true
+		case strings.HasPrefix(part, "DEV_") && len(part) >= 8:
+			p.dev = hex16(part[4:8])
 		case strings.HasPrefix(part, "SUBSYS_") && len(part) >= 15:
 			// SUBSYS_ddddvvvv: subsystem device id, then subsystem vendor id.
-			subsysVen, _ = hex16(part[11:15])
+			p.subDev, p.subVen = hex16(part[7:11]), hex16(part[11:15])
 		}
 	}
-	return ven, subsysVen, ok
+	return p, ok
 }
+
+const (
+	pciVendorAMD   = 0x1022 // AMD CPUs and chipsets (AMD GPUs are 0x1002)
+	pciVendorIntel = 0x8086
+	pciVendorMSI   = 0x1462
+)
+
+// boardIdentity reads the motherboard's identity from the subsystem IDs its
+// firmware stamps on the board's own chipset and CPU functions (AMD/Intel
+// vendor IDs). This is independent of the SMBIOS name text, which is easy to
+// edit and is sometimes wrong — so the dashboard can catch a board whose name
+// was rewritten. Add-in cards don't count: GPUs and most NICs have other chip
+// vendors, and Intel/AMD's own cards (e.g. an Intel SSD) carry their own vendor
+// ID as subsystem vendor, which is skipped like an unprogrammed default.
+//
+// The most common stamp wins, and it must appear at least twice to rule out a
+// stray device. For MSI the subsystem device is the board's model code: 7B86 →
+// "MS-7B86". Other makers use internal numbers, reported as-is.
+func boardIdentity(ids []pciID) (maker, code string) {
+	counts := map[[2]uint16]int{}
+	for _, p := range ids {
+		if p.ven != pciVendorAMD && p.ven != pciVendorIntel {
+			continue
+		}
+		switch p.subVen {
+		case 0, 0xFFFF, pciVendorAMD, pciVendorIntel:
+			continue // not programmed by the board's firmware
+		}
+		counts[[2]uint16{p.subVen, p.subDev}]++
+	}
+	var best [2]uint16
+	n := 0
+	for k, c := range counts {
+		if c > n || (c == n && (k[0] < best[0] || (k[0] == best[0] && k[1] < best[1]))) {
+			best, n = k, c
+		}
+	}
+	if n < 2 {
+		return "", ""
+	}
+	maker = pciVendors[best[0]]
+	if maker == "" {
+		maker = fmt.Sprintf("vendor %04X", best[0])
+	}
+	if best[0] == pciVendorMSI {
+		return maker, fmt.Sprintf("MS-%04X", best[1])
+	}
+	return maker, fmt.Sprintf("%04X", best[1])
+}
+
+// --- GPUs -----------------------------------------------------------------------
 
 // pciVendors names PCI vendor IDs: the GPU chip makers, and the card makers
 // (board partners and laptop OEMs) that appear as subsystem vendors.
@@ -778,7 +837,7 @@ var pciVendors = map[uint16]string{
 	0x1043: "ASUS", 0x1462: "MSI", 0x1458: "Gigabyte", 0x3842: "EVGA",
 	0x19DA: "Zotac", 0x1569: "Palit", 0x10B0: "Gainward", 0x1B4C: "Galax",
 	0x7377: "Colorful", 0x196E: "PNY", 0x1DA2: "Sapphire", 0x174B: "Sapphire",
-	0x1682: "XFX", 0x148C: "PowerColor", 0x1849: "ASRock", 0x107D: "Leadtek",
+	0x1682: "XFX", 0x148C: "PowerColor", 0x1849: "ASRock", 0x107D: "Leadtek", 0x1565: "Biostar",
 	0x1028: "Dell", 0x103C: "HP", 0x17AA: "Lenovo", 0x1025: "Acer",
 	0x144D: "Samsung", 0x1179: "Toshiba", 0x1558: "Clevo", 0x152D: "Quanta",
 	0x1734: "Fujitsu", 0x1D05: "Tongfang", 0x1D72: "Xiaomi", 0x1E83: "Huawei",

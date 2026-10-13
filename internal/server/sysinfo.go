@@ -47,6 +47,7 @@ func sanitizeSystemInfo(in *shared.SystemInfo) *shared.SystemInfo {
 		out.Board = &shared.BoardInfo{
 			Manufacturer: clip(b.Manufacturer), Product: clip(b.Product),
 			SystemMaker: clip(b.SystemMaker), SystemModel: clip(b.SystemModel), BIOS: clip(b.BIOS),
+			HWMaker: clip(b.HWMaker), HWCode: clip(b.HWCode),
 		}
 	}
 	for i, d := range in.Drives {

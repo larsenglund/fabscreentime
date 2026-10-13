@@ -106,6 +106,11 @@ type BoardInfo struct {
 	SystemMaker  string `json:"system_maker,omitempty"` // whole-computer maker (blank on self-built PCs)
 	SystemModel  string `json:"system_model,omitempty"`
 	BIOS         string `json:"bios,omitempty"` // BIOS version
+	// The board's identity as stamped on its own chipset devices (PCI subsystem
+	// IDs), independent of the name text above — which can be edited and is
+	// then wrong. For MSI the code is the board's model code ("MS-7B86").
+	HWMaker string `json:"hw_maker,omitempty"`
+	HWCode  string `json:"hw_code,omitempty"`
 }
 
 // DriveInfo describes one internal disk.

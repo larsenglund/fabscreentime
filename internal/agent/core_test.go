@@ -11,6 +11,15 @@ import (
 	"github.com/larsenglund/fabscreentime/internal/shared"
 )
 
+// fixedSampler returns the same reading every time, without touching real
+// hardware: the Windows sampler queries the physical monitor over DDC/CI,
+// which is slow and slows every later test in the process.
+type fixedSampler struct{}
+
+func (fixedSampler) Sample() (Reading, error) {
+	return Reading{MonitorsActive: 1, DisplayPower: -1, DDCPower: DDCNotSampled, ExeName: "a.exe"}, nil
+}
+
 // panicSampler panics on every Sample, counting how many times it was called.
 type panicSampler struct{ calls int64 }
 
@@ -132,7 +141,7 @@ func TestSystemInfoSentOnlyWhenChanged(t *testing.T) {
 		SystemInfo: func() *shared.SystemInfo {
 			return &shared.SystemInfo{CollectedAt: now.Unix(), CPU: &shared.CPUInfo{Model: cpu}}
 		},
-	}, NewSampler(), q, up, nil)
+	}, fixedSampler{}, q, up, nil)
 	ctx := context.Background()
 	sent := func() string {
 		if up.gotSys == nil || up.gotSys.CPU == nil {
@@ -180,7 +189,7 @@ func TestSystemInfoSentOnlyWhenChanged(t *testing.T) {
 // A collector that panics must not take the agent down; it just yields nothing.
 func TestSystemInfoCollectorPanicIsContained(t *testing.T) {
 	q, _ := NewQueue(filepath.Join(t.TempDir(), "queue.json"), 5)
-	a := New(Config{SystemInfo: func() *shared.SystemInfo { panic("probe boom") }}, NewSampler(), q, &fakeUploader{}, nil)
+	a := New(Config{SystemInfo: func() *shared.SystemInfo { panic("probe boom") }}, fixedSampler{}, q, &fakeUploader{}, nil)
 	a.refreshSystemInfo()
 	if info, _ := a.pendingSystemInfo(); info != nil {
 		t.Fatalf("panicking collector produced %+v", info)
@@ -393,7 +402,6 @@ func TestRunKeepsTickingWhileASampleIsStuck(t *testing.T) {
 
 func TestRunRestartsWhenACycleNeverReturns(t *testing.T) {
 	s := &blockingSampler{release: make(chan struct{}), started: make(chan struct{})}
-	defer close(s.release)
 	q, err := NewQueue(filepath.Join(t.TempDir(), "queue.json"), 50)
 	if err != nil {
 		t.Fatalf("NewQueue: %v", err)
@@ -407,7 +415,14 @@ func TestRunRestartsWhenACycleNeverReturns(t *testing.T) {
 	}, s, q, &fakeUploader{}, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Unblock the wedged cycle and let it finish before the test returns: it
+	// goes on to write the queue file, and on Windows a file still open in
+	// t.TempDir() makes the temp-dir cleanup fail the test.
+	defer func() {
+		cancel()
+		close(s.release)
+		a.awaitTick(2 * time.Second)
+	}()
 	go a.Run(ctx)
 
 	select {

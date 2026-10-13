@@ -134,9 +134,18 @@ function SystemInfoRows({ info }: { info: SystemInfo }) {
     );
   }
   if (boardName) {
+    const hwID = board?.hw_maker
+      ? board.hw_code?.startsWith("MS-")
+        ? `${board.hw_maker} ${board.hw_code}`
+        : board.hw_maker // other makers' codes are internal numbers, meaningless to a reader
+      : "";
     rows.push(
       <Row key="board" icon={CircuitBoard} label="Motherboard">
-        <Item main={boardName} details={[board?.bios ? `BIOS ${board.bios}` : ""]} />
+        <Item
+          main={boardName}
+          details={[board?.bios ? `BIOS ${board.bios}` : "", hwID && `chipset ID: ${hwID}`]}
+          warnings={[boardNameWarning(cpu?.vendor, board)]}
+        />
       </Row>,
     );
   }
@@ -234,6 +243,59 @@ function Item({
       ))}
     </div>
   );
+}
+
+// Desktop chipsets, which board names include ("PRO Z690-P", "B450M Pro4-F").
+const INTEL_CHIPSETS =
+  "Z890 B860 H810 Z790 B760 H770 H610 Z690 B660 H670 Z590 B560 H570 H510 Z490 B460 H470 H410 " +
+  "Z390 B365 B360 H370 H310 Z370 Z270 B250 H270 Z170 B150 H170 H110 Z97 H97 Z87 H87 B85 H81 X299 X99 X79";
+const AMD_CHIPSETS =
+  "X870E X870 B850 B840 X670E X670 B650E B650 A620 X570 B550 A520 X470 B450 X370 B350 A320 X399 TRX40 TRX50 WRX80 WRX90";
+
+/** chipsetIn finds a desktop chipset named in a board name, allowing the usual
+ *  suffix letter ("B450M", "X570S"). */
+function chipsetIn(name: string): { vendor: "Intel" | "AMD"; chipset: string } | null {
+  for (const [vendor, list] of [["Intel", INTEL_CHIPSETS], ["AMD", AMD_CHIPSETS]] as const) {
+    const m = name.match(new RegExp(`\\b(${list.split(" ").join("|")})[A-Z]?\\b`, "i"));
+    if (m) return { vendor, chipset: m[1].toUpperCase() };
+  }
+  return null;
+}
+
+const RETAIL_BOARD_MAKERS = ["ASUS", "MSI", "Gigabyte", "ASRock", "Biostar"];
+
+/** boardNameWarning catches a board whose firmware name has been rewritten
+ *  (refurbished boards, previous owners, anti-cheat "spoofer" tools). It matters
+ *  because the name is what people go by for BIOS updates — and flashing another
+ *  board's BIOS can brick it. The name is checked against facts it can't fake:
+ *  the CPU (an Intel chipset can't host an AMD CPU, or vice versa) and the
+ *  identity the firmware stamps on the board's own chipset devices. */
+function boardNameWarning(
+  cpuVendor: string | undefined,
+  board: SystemInfo["board"],
+): string | undefined {
+  const product = board?.product ?? "";
+  const advice =
+    "the board's name has likely been edited. Go by the model printed on the board, and don't install BIOS updates or chipset drivers for the reported model.";
+
+  const cs = chipsetIn(product);
+  if (cs && (cpuVendor === "Intel" || cpuVendor === "AMD") && cs.vendor !== cpuVendor) {
+    return `The firmware calls this an ${cs.vendor} ${cs.chipset} board, but the processor is ${cpuVendor} — ${advice}`;
+  }
+  const fwCode = product.match(/\bMS-[0-9A-F]{4}\b/i)?.[0].toUpperCase();
+  const hwCode = board?.hw_code?.toUpperCase();
+  if (fwCode && hwCode?.startsWith("MS-") && fwCode !== hwCode) {
+    return `The firmware says ${fwCode}, but the board's chipset reports ${hwCode} — ${advice}`;
+  }
+  const fwMaker = board?.manufacturer;
+  const hwMaker = board?.hw_maker;
+  if (
+    fwMaker && hwMaker && fwMaker !== hwMaker &&
+    RETAIL_BOARD_MAKERS.includes(fwMaker) && RETAIL_BOARD_MAKERS.includes(hwMaker)
+  ) {
+    return `The firmware says ${fwMaker}, but the board's chipset reports ${hwMaker} — ${advice}`;
+  }
+  return undefined;
 }
 
 /** slowWiredLink spots a gigabit-or-faster Ethernet adapter that negotiated a

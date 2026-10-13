@@ -37,6 +37,14 @@ func collectPlatform(info *shared.SystemInfo, ip net.IP) {
 	probe("cpu", func() { info.CPU = readCPU(smbios) })
 	probe("memory", func() { info.Memory = readMemory(smbios) })
 	probe("board", func() { info.Board = buildBoardInfo(smbios) })
+	probe("board id", func() {
+		if maker, code := boardIdentity(readPCIIDs()); code != "" {
+			if info.Board == nil {
+				info.Board = &shared.BoardInfo{}
+			}
+			info.Board.HWMaker, info.Board.HWCode = maker, code
+		}
+	})
 	probe("gpu", func() { info.GPUs = readGPUs() })
 	probe("drives", func() { info.Drives = readDrives() })
 	probe("network", func() { info.Network = readNetwork(ip) })
@@ -133,7 +141,7 @@ func readGPUs() []shared.GPUInfo {
 		if err != nil {
 			continue
 		}
-		ven, subsys, ok := parsePCIInstance(id)
+		p, ok := parsePCIInstance(id)
 		if !ok {
 			continue
 		}
@@ -141,14 +149,39 @@ func readGPUs() []shared.GPUInfo {
 		mfg := regString(devs.DeviceRegistryProperty(di, windows.SPDRP_MFG))
 		g := shared.GPUInfo{
 			Model:     cleanString(model),
-			Vendor:    gpuVendor(ven, mfg),
-			Maker:     gpuMaker(ven, subsys),
+			Vendor:    gpuVendor(p.ven, mfg),
+			Maker:     gpuMaker(p.ven, p.subVen),
 			VRAMBytes: gpuVRAM(devs, di),
 		}
 		if g.Model == "" {
 			continue
 		}
 		out = append(out, g)
+	}
+	return out
+}
+
+// readPCIIDs lists the IDs of every PCI function present (for boardIdentity).
+func readPCIIDs() []pciID {
+	devs, err := windows.SetupDiGetClassDevsEx(nil, "PCI", 0, windows.DIGCF_ALLCLASSES|windows.DIGCF_PRESENT, 0, "")
+	if err != nil {
+		return nil
+	}
+	defer devs.Close()
+	var out []pciID
+	for i := 0; i < 1024; i++ {
+		di, err := devs.EnumDeviceInfo(i)
+		if err != nil {
+			if errors.Is(err, windows.ERROR_NO_MORE_ITEMS) {
+				break
+			}
+			continue
+		}
+		if id, err := devs.DeviceInstanceID(di); err == nil {
+			if p, ok := parsePCIInstance(id); ok {
+				out = append(out, p)
+			}
+		}
 	}
 	return out
 }

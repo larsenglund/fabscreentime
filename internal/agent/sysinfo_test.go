@@ -255,23 +255,62 @@ func TestDriveMaker(t *testing.T) {
 }
 
 func TestGPUIdentity(t *testing.T) {
-	ven, sub, ok := parsePCIInstance(`PCI\VEN_10DE&DEV_1C03&SUBSYS_85AE1043&REV_A1\4&2B8260C3&0&0008`)
-	if !ok || ven != 0x10DE || sub != 0x1043 {
-		t.Fatalf("parsed ven=%04X subsys=%04X ok=%v", ven, sub, ok)
+	p, ok := parsePCIInstance(`PCI\VEN_10DE&DEV_1C03&SUBSYS_85AE1043&REV_A1\4&2B8260C3&0&0008`)
+	if !ok || p != (pciID{ven: 0x10DE, dev: 0x1C03, subVen: 0x1043, subDev: 0x85AE}) {
+		t.Fatalf("parsed %+v ok=%v", p, ok)
 	}
-	if v, m := gpuVendor(ven, ""), gpuMaker(ven, sub); v != "NVIDIA" || m != "ASUS" {
+	if v, m := gpuVendor(p.ven, ""), gpuMaker(p.ven, p.subVen); v != "NVIDIA" || m != "ASUS" {
 		t.Errorf("vendor=%q maker=%q, want NVIDIA / ASUS", v, m)
 	}
 	// A reference card's subsystem vendor is the chip maker itself: no separate maker.
-	ven, sub, _ = parsePCIInstance(`PCI\VEN_10DE&DEV_2484&SUBSYS_146B10DE&REV_A1\4&1`)
-	if m := gpuMaker(ven, sub); m != "" {
+	p, _ = parsePCIInstance(`PCI\VEN_10DE&DEV_2484&SUBSYS_146B10DE&REV_A1\4&1`)
+	if m := gpuMaker(p.ven, p.subVen); m != "" {
 		t.Errorf("reference card maker = %q, want empty", m)
 	}
 	if gpuVendor(0x9999, "Advanced Micro Devices, Inc.") != "AMD" {
 		t.Error("unknown vendor id should fall back to the driver's manufacturer")
 	}
-	if _, _, ok := parsePCIInstance(`ROOT\BasicDisplay\0000`); ok {
+	if _, ok := parsePCIInstance(`ROOT\BasicDisplay\0000`); ok {
 		t.Error("a software display adapter must not parse as PCI")
+	}
+}
+
+// Modelled on a real fleet PC whose firmware name says "MSI PRO Z690-P" but
+// whose AMD chipset devices carry MSI's MS-7B86 (an AM4 B450 board) stamp.
+func TestBoardIdentity(t *testing.T) {
+	ids := func(instances ...string) []pciID {
+		var out []pciID
+		for _, s := range instances {
+			if p, ok := parsePCIInstance(s); ok {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	maker, code := boardIdentity(ids(
+		`PCI\VEN_1022&DEV_790B&SUBSYS_7B861462&REV_61\3&11583659&0&A0`, // FCH SMBus
+		`PCI\VEN_1022&DEV_43D5&SUBSYS_7B861462&REV_01\4&1`,             // chipset USB
+		`PCI\VEN_1022&DEV_149C&SUBSYS_7B861462&REV_00\4&2`,             // CPU USB
+		`PCI\VEN_1022&DEV_1480&SUBSYS_14801022&REV_00\3&1`,             // root complex, left at AMD's default
+		`PCI\VEN_8086&DEV_F1A8&SUBSYS_390A8086&REV_03\4&3`,             // Intel NVMe SSD: its own stamp
+		`PCI\VEN_10DE&DEV_2489&SUBSYS_884F1043&REV_A1\4&4`,             // ASUS-built NVIDIA card
+		`PCI\VEN_10DE&DEV_228B&SUBSYS_884F1043&REV_A1\4&5`,             // ...and its HDMI audio
+	))
+	if maker != "MSI" || code != "MS-7B86" {
+		t.Errorf("MSI board = %q %q, want MSI MS-7B86", maker, code)
+	}
+
+	maker, code = boardIdentity(ids(
+		`PCI\VEN_8086&DEV_7A23&SUBSYS_87471043&REV_11\3&1`,
+		`PCI\VEN_8086&DEV_7AE0&SUBSYS_87471043&REV_11\3&2`,
+	))
+	if maker != "ASUS" || code != "8747" {
+		t.Errorf("ASUS board = %q %q, want ASUS 8747", maker, code)
+	}
+
+	// One stamped device isn't enough evidence to name the board.
+	if maker, code = boardIdentity(ids(`PCI\VEN_1022&DEV_790B&SUBSYS_7B861462&REV_61\3&1`)); code != "" {
+		t.Errorf("single device named a board: %q %q", maker, code)
 	}
 }
 
