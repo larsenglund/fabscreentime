@@ -35,6 +35,7 @@ func main() {
 	dataDir := flag.String("datadir", agent.InstallDir(), "directory for credentials + queue")
 	enroll := flag.String("enroll", "", "one-time enrollment secret (dev/manual; the installer uses enroll.json)")
 	once := flag.Bool("once", false, "sample once, print the reading as JSON, and exit (CI smoke test)")
+	sysinfo := flag.Bool("sysinfo", false, "collect the computer's hardware/network inventory, print it as JSON, and exit")
 	install := flag.Bool("install", false, "install silent autostart (hidden logon Scheduled Task) and exit")
 	uninstall := flag.Bool("uninstall", false, "remove the autostart Scheduled Task and exit")
 	flag.Parse()
@@ -45,6 +46,11 @@ func main() {
 			log.Fatalf("sample: %v", err)
 		}
 		b, _ := json.MarshalIndent(r, "", "  ")
+		fmt.Println(string(b))
+		return
+	}
+	if *sysinfo {
+		b, _ := json.MarshalIndent(agent.CollectSystemInfo(*server, time.Now()), "", "  ")
 		fmt.Println(string(b))
 		return
 	}
@@ -159,6 +165,7 @@ func main() {
 		Interval:       *interval,
 		OnFirstCheckIn: func() { agent.MarkCheckedIn(*dataDir, build) },
 		OnStall:        restartWedged,
+		SystemInfo:     agent.SystemInfoCollector(serverURL),
 	}, agent.NewSampler(), queue, agent.NewHTTPUploader(serverURL, creds.APIToken), updater)
 
 	log.Printf("agent %s (build %d) starting: device=%s host=%s server=%s interval=%s datadir=%s",

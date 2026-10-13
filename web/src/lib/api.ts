@@ -75,6 +75,44 @@ export interface HeatDay {
   hours: number[];
 }
 
+export interface MemoryModule {
+  slot?: string;
+  size_bytes: number;
+  type?: string;
+  speed_mts?: number;
+  rated_mts?: number;
+  manufacturer?: string;
+  part_number?: string;
+}
+
+export interface GPUInfo {
+  model: string;
+  vendor?: string;
+  maker?: string; // card maker (board partner), when different from the chip maker
+  vram_bytes?: number;
+}
+
+export interface DriveInfo {
+  model: string;
+  maker?: string;
+  size_bytes?: number;
+  bus?: string; // "NVMe" | "SATA" | "SAS" | "SCSI" | "RAID"
+  media?: string; // "SSD" | "HDD"
+}
+
+/** SystemInfo is a computer's hardware/network inventory as its agent reported it.
+ *  Every part is optional: a probe that failed just leaves its part out. */
+export interface SystemInfo {
+  collected_at: number;
+  os?: string;
+  cpu?: { model: string; vendor?: string; cores?: number; threads?: number };
+  memory?: { total_bytes: number; type?: string; speed_mts?: number; slots?: number; modules?: MemoryModule[] };
+  gpus?: GPUInfo[];
+  board?: { manufacturer?: string; product?: string; system_maker?: string; system_model?: string; bios?: string };
+  drives?: DriveInfo[];
+  network?: { name?: string; kind?: string; adapter?: string; ipv4?: string; link_mbps?: number };
+}
+
 export interface PrepareEnrollResponse {
   device_uuid: string;
   enroll_secret: string;
@@ -193,6 +231,17 @@ export function useDeviceEvents(uuid: string) {
     queryKey: ["events", uuid],
     queryFn: () => getJSON<{ events: DeviceEvent[] }>(`/api/devices/${uuid}/events`),
     refetchInterval: LIVE,
+  });
+}
+
+/** useSystemInfo fetches the computer's last reported hardware inventory. It
+ *  changes rarely, so it polls far less often than the activity views. */
+export function useSystemInfo(uuid: string) {
+  return useQuery({
+    queryKey: ["system", uuid],
+    queryFn: () =>
+      getJSON<{ system_info: SystemInfo | null; updated_at: number }>(`/api/devices/${uuid}/system`),
+    refetchInterval: 60_000,
   });
 }
 

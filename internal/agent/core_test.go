@@ -64,9 +64,11 @@ type fakeUploader struct {
 	serverTS    int64
 	updateSM    *shared.SignedManifest
 	updateFlag  bool
+	gotSys      *shared.SystemInfo // inventory on the last upload attempt (nil = none)
 }
 
 func (f *fakeUploader) Upload(_ context.Context, req shared.IngestRequest) (shared.IngestResponse, error) {
+	f.gotSys = req.SystemInfo
 	if f.fail {
 		return shared.IngestResponse{}, errors.New("network down")
 	}
@@ -112,6 +114,77 @@ type fakeUpdater struct {
 func (f *fakeUpdater) Maybe(_ context.Context, sm shared.SignedManifest) {
 	f.calls++
 	f.lastSM = sm
+}
+
+// The inventory rides along only when it changed since the server last accepted
+// it — retried after a failed upload, and refreshed periodically regardless.
+func TestSystemInfoSentOnlyWhenChanged(t *testing.T) {
+	q, err := NewQueue(filepath.Join(t.TempDir(), "queue.json"), 50)
+	if err != nil {
+		t.Fatalf("NewQueue: %v", err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	cpu := "cpu-a"
+	up := &fakeUploader{}
+	a := New(Config{
+		DeviceUUID: "dev-1",
+		Now:        func() time.Time { return now },
+		SystemInfo: func() *shared.SystemInfo {
+			return &shared.SystemInfo{CollectedAt: now.Unix(), CPU: &shared.CPUInfo{Model: cpu}}
+		},
+	}, NewSampler(), q, up, nil)
+	ctx := context.Background()
+	sent := func() string {
+		if up.gotSys == nil || up.gotSys.CPU == nil {
+			return ""
+		}
+		return up.gotSys.CPU.Model
+	}
+
+	a.Tick(ctx)
+	if sent() != "" {
+		t.Fatal("inventory sent before any was collected")
+	}
+	a.refreshSystemInfo()
+	if a.Tick(ctx); sent() != "cpu-a" {
+		t.Fatalf("first upload after collecting carried %q, want cpu-a", sent())
+	}
+
+	// Re-collected but unchanged (only the timestamp moved): not re-sent.
+	now = now.Add(30 * time.Minute)
+	a.refreshSystemInfo()
+	if a.Tick(ctx); sent() != "" {
+		t.Fatalf("unchanged inventory re-sent: %q", sent())
+	}
+
+	// Changed, but the upload fails: must be retried until accepted.
+	cpu = "cpu-b"
+	a.refreshSystemInfo()
+	up.fail = true
+	a.Tick(ctx)
+	up.fail = false
+	if a.Tick(ctx); sent() != "cpu-b" {
+		t.Fatalf("change not retried after a failed upload: %q", sent())
+	}
+	if a.Tick(ctx); sent() != "" {
+		t.Fatalf("accepted inventory re-sent: %q", sent())
+	}
+
+	// Periodic refresh even when nothing changed.
+	now = now.Add(systemInfoResendAfter)
+	if a.Tick(ctx); sent() != "cpu-b" {
+		t.Fatalf("no periodic refresh: %q", sent())
+	}
+}
+
+// A collector that panics must not take the agent down; it just yields nothing.
+func TestSystemInfoCollectorPanicIsContained(t *testing.T) {
+	q, _ := NewQueue(filepath.Join(t.TempDir(), "queue.json"), 5)
+	a := New(Config{SystemInfo: func() *shared.SystemInfo { panic("probe boom") }}, NewSampler(), q, &fakeUploader{}, nil)
+	a.refreshSystemInfo()
+	if info, _ := a.pendingSystemInfo(); info != nil {
+		t.Fatalf("panicking collector produced %+v", info)
+	}
 }
 
 func TestTickRetainsQueueWhenUploadFails(t *testing.T) {

@@ -29,6 +29,7 @@ import { Switch } from "../components/ui/switch";
 import { Skeleton } from "../components/ui/skeleton";
 import { HourStrip, TopApps, SignalLegend, SignalComparison, Heatmap } from "../components/charts";
 import { RangeSwitcher, type RangeKey } from "../components/RangeSwitcher";
+import { SystemInfoCard } from "../components/SystemInfoCard";
 
 export function DeviceDetail() {
   const { uuid = "" } = useParams();
@@ -280,6 +281,8 @@ export function DeviceDetail() {
           <Heatmap days={heatmap.data?.heatmap ?? []} />
         )}
       </CardSection>
+
+      <SystemInfoCard uuid={uuid} />
 
       <CardSection
         title="Update history"

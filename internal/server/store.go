@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS devices (
     revoked             INTEGER NOT NULL DEFAULT 0,
     log_titles          INTEGER NOT NULL DEFAULT 1, -- 0 = drop window titles on ingest (privacy, §9)
     clock_skew_seconds  INTEGER,            -- last agent-minus-server clock offset (NULL until the agent reports client_now)
+    system_info         TEXT,               -- last hardware/network inventory the agent reported (JSON)
+    system_info_at      INTEGER,            -- when the server received it
     created_at          INTEGER NOT NULL
 );
 
@@ -148,6 +150,8 @@ func OpenStore(path string) (*Store, error) {
 		`ALTER TABLE devices ADD COLUMN log_titles INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE devices ADD COLUMN agent_build INTEGER`,
 		`ALTER TABLE devices ADD COLUMN clock_skew_seconds INTEGER`,
+		`ALTER TABLE devices ADD COLUMN system_info TEXT`,
+		`ALTER TABLE devices ADD COLUMN system_info_at INTEGER`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -348,6 +352,27 @@ func (s *Store) DeviceLogTitles(id int64) (bool, error) {
 func (s *Store) SetLogTitles(uuid string, on bool) error {
 	_, err := s.db.Exec(`UPDATE devices SET log_titles = ? WHERE device_uuid = ?`, boolToInt(on), uuid)
 	return err
+}
+
+// SetSystemInfo stores a device's latest hardware/network inventory (JSON).
+func (s *Store) SetSystemInfo(id int64, info []byte, now int64) error {
+	_, err := s.db.Exec(`UPDATE devices SET system_info = ?, system_info_at = ? WHERE id = ?`, string(info), now, id)
+	return err
+}
+
+// SystemInfoByUUID returns a device's stored inventory JSON (nil if it never
+// reported one) and when it arrived. sql.ErrNoRows if the UUID is unknown.
+func (s *Store) SystemInfoByUUID(uuid string) ([]byte, int64, error) {
+	var info sql.NullString
+	var at sql.NullInt64
+	err := s.db.QueryRow(`SELECT system_info, system_info_at FROM devices WHERE device_uuid = ?`, uuid).Scan(&info, &at)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !info.Valid || info.String == "" {
+		return nil, 0, nil
+	}
+	return []byte(info.String), at.Int64, nil
 }
 
 // RenameDevice sets a device's display name by UUID.

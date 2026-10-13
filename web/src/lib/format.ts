@@ -81,6 +81,26 @@ export function fmtDate(ts: number): string {
   });
 }
 
+/** fmtMemory renders RAM / video memory, which come in powers of two, the way
+ *  they're labelled: "16 GB", "1.5 GB", "512 MB". */
+export function fmtMemory(bytes: number): string {
+  if (!bytes) return "—";
+  const gb = bytes / 2 ** 30;
+  if (gb >= 1) return `${+gb.toFixed(1)} GB`;
+  return `${Math.round(bytes / 2 ** 20)} MB`;
+}
+
+/** fmtDiskSize renders a drive's capacity in the decimal units drives are sold
+ *  in, so a "1 TB" drive reads as 1 TB rather than 931 GB. */
+export function fmtDiskSize(bytes: number): string {
+  if (!bytes) return "";
+  if (bytes >= 1e12) {
+    const tb = bytes / 1e12;
+    return `${tb >= 10 ? Math.round(tb) : +tb.toFixed(1)} TB`;
+  }
+  return `${Math.round(bytes / 1e9)} GB`;
+}
+
 /** shiftDay returns dayStr (YYYY-MM-DD) offset by n days. */
 export function shiftDay(dayStr: string, n: number): string {
   const d = new Date(dayStr + "T00:00:00Z");

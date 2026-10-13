@@ -41,6 +41,96 @@ type IngestRequest struct {
 	ClientNow    int64          `json:"client_now"` // agent wall-clock (unix s) at upload, for clock-skew detection (§8, 0 = not reported)
 	Samples      []Sample       `json:"samples"`
 	Events       []MonitorEvent `json:"events"`
+	// SystemInfo is the computer's hardware/network inventory. Sent only when it
+	// changed (plus an occasional refresh), so it is absent from most ingests.
+	SystemInfo *SystemInfo `json:"system_info,omitempty"`
+}
+
+// --- Computer inventory -------------------------------------------------------
+
+// SystemInfo is a computer's hardware and network inventory, collected by the
+// agent off the sampling path. Every part is best-effort: a probe that fails
+// (or isn't supported on that machine) just leaves its field empty.
+type SystemInfo struct {
+	CollectedAt int64        `json:"collected_at"` // unix seconds, agent clock
+	OS          string       `json:"os,omitempty"` // e.g. "Windows 11 Pro 24H2 (build 26100.2033)"
+	CPU         *CPUInfo     `json:"cpu,omitempty"`
+	Memory      *MemoryInfo  `json:"memory,omitempty"`
+	GPUs        []GPUInfo    `json:"gpus,omitempty"`
+	Board       *BoardInfo   `json:"board,omitempty"`
+	Drives      []DriveInfo  `json:"drives,omitempty"`
+	Network     *NetworkInfo `json:"network,omitempty"`
+}
+
+// CPUInfo describes the processor.
+type CPUInfo struct {
+	Model   string `json:"model"`             // e.g. "AMD Ryzen 7 5800X 8-Core Processor"
+	Vendor  string `json:"vendor,omitempty"`  // "AMD", "Intel", ...
+	Cores   int    `json:"cores,omitempty"`   // physical cores (0 = unknown)
+	Threads int    `json:"threads,omitempty"` // logical processors
+}
+
+// MemoryInfo describes installed RAM.
+type MemoryInfo struct {
+	TotalBytes uint64         `json:"total_bytes"`         // installed (not usable) RAM
+	Type       string         `json:"type,omitempty"`      // "DDR4", "DDR5", ...
+	SpeedMTs   int            `json:"speed_mts,omitempty"` // speed it actually runs at, MT/s
+	Slots      int            `json:"slots,omitempty"`     // memory slots on the board (0 = unknown)
+	Modules    []MemoryModule `json:"modules,omitempty"`   // populated slots only
+}
+
+// MemoryModule is one installed RAM stick.
+type MemoryModule struct {
+	Slot         string `json:"slot,omitempty"` // board label, e.g. "DIMM_A2"
+	SizeBytes    uint64 `json:"size_bytes"`
+	Type         string `json:"type,omitempty"`
+	SpeedMTs     int    `json:"speed_mts,omitempty"` // configured (running) speed
+	RatedMTs     int    `json:"rated_mts,omitempty"` // the module's own maximum
+	Manufacturer string `json:"manufacturer,omitempty"`
+	PartNumber   string `json:"part_number,omitempty"`
+}
+
+// GPUInfo describes one graphics adapter.
+type GPUInfo struct {
+	Model     string `json:"model"`
+	Vendor    string `json:"vendor,omitempty"`     // chip maker: NVIDIA, AMD, Intel
+	Maker     string `json:"maker,omitempty"`      // card maker (e.g. ASUS); empty if unknown or the chip maker itself
+	VRAMBytes uint64 `json:"vram_bytes,omitempty"` // dedicated video memory
+}
+
+// BoardInfo describes the motherboard and, for laptops and prebuilt PCs, the
+// computer model.
+type BoardInfo struct {
+	Manufacturer string `json:"manufacturer,omitempty"` // motherboard maker
+	Product      string `json:"product,omitempty"`      // motherboard model
+	SystemMaker  string `json:"system_maker,omitempty"` // whole-computer maker (blank on self-built PCs)
+	SystemModel  string `json:"system_model,omitempty"`
+	BIOS         string `json:"bios,omitempty"` // BIOS version
+}
+
+// DriveInfo describes one internal disk.
+type DriveInfo struct {
+	Model     string `json:"model"`
+	Maker     string `json:"maker,omitempty"`
+	SizeBytes uint64 `json:"size_bytes,omitempty"`
+	Bus       string `json:"bus,omitempty"`   // "NVMe", "SATA", "SAS", "SCSI", "RAID"
+	Media     string `json:"media,omitempty"` // "SSD", "HDD", or "" when unknown
+}
+
+// NetworkInfo describes the connection the computer uses to reach the dashboard.
+type NetworkInfo struct {
+	Name     string `json:"name,omitempty"`    // network name: the Wi-Fi network, or Windows' name for a wired one
+	Kind     string `json:"kind,omitempty"`    // "Wi-Fi", "Ethernet", "Mobile broadband", ...
+	Adapter  string `json:"adapter,omitempty"` // network adapter model
+	IPv4     string `json:"ipv4,omitempty"`
+	LinkMbps int    `json:"link_mbps,omitempty"` // negotiated link speed
+}
+
+// DeviceSystemInfo is GET /api/devices/{uuid}/system: the last inventory a device
+// reported, and when the server received it (0 = never).
+type DeviceSystemInfo struct {
+	SystemInfo *SystemInfo `json:"system_info"`
+	UpdatedAt  int64       `json:"updated_at"`
 }
 
 // Manifest describes an agent release. Every field is covered by the signature

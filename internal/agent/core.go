@@ -17,6 +17,16 @@ const maxPendingEvents = 4096 // bounded so a long outage can't grow it unbounde
 // timeout must never trip it, only a cycle that has genuinely stopped returning.
 const defaultStallAfter = 5 * time.Minute
 
+// System-inventory cadence. Collected a little after start (so it doesn't pile
+// onto the agent's first seconds, which behavioral antivirus watches most
+// closely), then re-checked periodically; sent when it changed, and re-sent now
+// and then anyway so the dashboard copy can never stay stale for long.
+const (
+	defaultSystemInfoDelay = 2 * time.Minute
+	defaultSystemInfoEvery = 30 * time.Minute
+	systemInfoResendAfter  = 6 * time.Hour
+)
+
 // Uploader sends a batch to the backend and returns the parsed response.
 // Abstracted so the core can be tested without a real HTTP server.
 type Uploader interface {
@@ -49,6 +59,13 @@ type Config struct {
 	OnStall func()
 	// StallAfter overrides defaultStallAfter. Injectable for tests.
 	StallAfter time.Duration
+	// SystemInfo collects the computer's hardware/network inventory. It runs on
+	// its own goroutine, never inside a sample cycle, so a slow or hung probe can
+	// only delay the inventory — never sampling. nil disables it.
+	SystemInfo func() *shared.SystemInfo
+	// SystemInfoDelay / SystemInfoEvery override the collection cadence (tests).
+	SystemInfoDelay time.Duration
+	SystemInfoEvery time.Duration
 }
 
 // Agent samples once per interval, buffers to a bounded queue, and flushes the
@@ -67,6 +84,11 @@ type Agent struct {
 	checkedIn     bool
 	tickBusy      bool      // a sample cycle is in flight
 	tickStarted   time.Time // when that cycle started, for the stall watchdog
+
+	sysInfo       *shared.SystemInfo // latest collected inventory (nil until the first collection)
+	sysInfoKey    string             // its content fingerprint
+	sysInfoSent   string             // fingerprint the server last accepted
+	sysInfoSentAt time.Time
 }
 
 // New wires an agent together. updater may be nil to disable self-update.
@@ -113,6 +135,82 @@ func (a *Agent) ackEvents(n int) {
 	} else {
 		a.pendingEvents = append(a.pendingEvents[:0], a.pendingEvents[n:]...)
 	}
+}
+
+// goSafe runs fn on its own goroutine with a panic guard. A panic in ANY
+// goroutine kills the whole process, and this build has no console to show
+// the trace — the agent would just vanish until the next reboot (it happened in
+// production). So every background goroutine logs and survives instead.
+func goSafe(what string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("%s panicked (recovered, agent continues): %v\n%s", what, r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}
+
+// systemInfoLoop collects the inventory shortly after start, then periodically.
+// Collection runs inline here, so a probe that hangs stalls only this loop —
+// never sampling, and never by piling up goroutines.
+func (a *Agent) systemInfoLoop(ctx context.Context) {
+	delay, every := a.cfg.SystemInfoDelay, a.cfg.SystemInfoEvery
+	if delay <= 0 {
+		delay = defaultSystemInfoDelay
+	}
+	if every <= 0 {
+		every = defaultSystemInfoEvery
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(delay):
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		a.refreshSystemInfo()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// refreshSystemInfo collects the inventory once and keeps it for the next upload.
+func (a *Agent) refreshSystemInfo() {
+	var info *shared.SystemInfo
+	probe("system info", func() { info = a.cfg.SystemInfo() })
+	if info == nil {
+		return
+	}
+	key := systemInfoKey(info)
+	a.mu.Lock()
+	a.sysInfo, a.sysInfoKey = info, key
+	a.mu.Unlock()
+}
+
+// pendingSystemInfo returns the inventory to attach to this upload: when it
+// changed since the server last accepted it, or that copy is getting old.
+func (a *Agent) pendingSystemInfo() (*shared.SystemInfo, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.sysInfo == nil {
+		return nil, ""
+	}
+	if a.sysInfoKey == a.sysInfoSent && a.cfg.Now().Sub(a.sysInfoSentAt) < systemInfoResendAfter {
+		return nil, ""
+	}
+	return a.sysInfo, a.sysInfoKey
+}
+
+func (a *Agent) markSystemInfoSent(key string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sysInfoSent, a.sysInfoSentAt = key, a.cfg.Now()
 }
 
 // monitorPollLoop polls the composite monitor state and records transitions.
@@ -197,6 +295,7 @@ func (a *Agent) flush(ctx context.Context) {
 	if len(batch) == 0 && len(events) == 0 {
 		return
 	}
+	sysInfo, sysKey := a.pendingSystemInfo()
 	resp, err := a.uploader.Upload(ctx, shared.IngestRequest{
 		AgentVersion: a.cfg.AgentVersion,
 		AgentBuild:   a.cfg.Build,
@@ -205,6 +304,7 @@ func (a *Agent) flush(ctx context.Context) {
 		ClientNow:    a.cfg.Now().Unix(), // for server-side clock-skew detection (§8)
 		Samples:      batch,
 		Events:       events,
+		SystemInfo:   sysInfo,
 	})
 	if err != nil {
 		log.Printf("upload failed (%d samples, %d events queued): %v", len(batch), len(events), err)
@@ -214,6 +314,9 @@ func (a *Agent) flush(ctx context.Context) {
 		log.Printf("ack error: %v", err)
 	}
 	a.ackEvents(len(events))
+	if sysInfo != nil {
+		a.markSystemInfoSent(sysKey)
+	}
 
 	// First successful check-in commits this build (crash-loop guard, §5.4).
 	if !a.checkedIn {
@@ -324,14 +427,10 @@ func (a *Agent) stallAfter() time.Duration {
 // exactly how a device went dark for a day in production.
 func (a *Agent) Run(ctx context.Context) {
 	if p, ok := a.sampler.(MonitorProber); ok {
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("monitor poll loop panicked (recovered, agent continues): %v\n%s", r, debug.Stack())
-				}
-			}()
-			a.monitorPollLoop(ctx, p)
-		}()
+		goSafe("monitor poll loop", func() { a.monitorPollLoop(ctx, p) })
+	}
+	if a.cfg.SystemInfo != nil {
+		goSafe("system info loop", func() { a.systemInfoLoop(ctx) })
 	}
 	a.startTick(ctx)
 	t := time.NewTicker(a.cfg.Interval)

@@ -143,6 +143,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/devices/{uuid}/signals", s.handleSignals)
 	mux.HandleFunc("GET /api/devices/{uuid}/heatmap", s.handleHeatmap)
 	mux.HandleFunc("GET /api/devices/{uuid}/events", s.handleDeviceEvents)
+	mux.HandleFunc("GET /api/devices/{uuid}/system", s.handleSystemInfo)
 	// Infra.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// Everything else is the embedded SPA (static assets + client-side routes).
@@ -182,6 +183,15 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		log.Printf("touch device: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
+	}
+	// Hardware inventory: only present when it changed. Best-effort — it's
+	// display-only, so a failure here must never cost the device its samples.
+	if req.SystemInfo != nil {
+		if b, err := json.Marshal(sanitizeSystemInfo(req.SystemInfo)); err == nil {
+			if err := s.store.SetSystemInfo(id, b, now); err != nil {
+				log.Printf("store system info: %v", err)
+			}
+		}
 	}
 	// Privacy opt-out (§9): drop window titles server-side for devices with
 	// log_titles=0, so they are never stored regardless of what the agent sends.
@@ -406,6 +416,29 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, d)
+}
+
+// handleSystemInfo serves a device's last reported hardware/network inventory.
+// A device that never reported one yields {"system_info": null, "updated_at": 0}.
+func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
+	raw, at, err := s.store.SystemInfoByUUID(r.PathValue("uuid"))
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("system info: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	out := shared.DeviceSystemInfo{UpdatedAt: at}
+	if raw != nil {
+		var info shared.SystemInfo
+		if err := json.Unmarshal(raw, &info); err == nil {
+			out.SystemInfo = &info
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleDeviceEvents(w http.ResponseWriter, r *http.Request) {
